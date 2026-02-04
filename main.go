@@ -65,11 +65,11 @@ type PushRequest struct {
 }
 
 type PullRequest struct {
-	PublicKey   string `json:"publicKey"`
-	Signature   string `json:"signature"`
-	TeamSlug    string `json:"teamSlug"`
-	ProjectSlug string `json:"projectSlug"`
-	Environment string `json:"environment"`
+	PublicKey   string   `json:"publicKey"`
+	Signature   string   `json:"signature"`
+	TeamSlug    string   `json:"teamSlug"`
+	ProjectSlug string   `json:"projectSlug"`
+	Environment string   `json:"environment"`
 }
 
 type ApproveRequest struct {
@@ -234,10 +234,41 @@ func (s *EnvwareService) RSADecrypt(encStr string, privKey *rsa.PrivateKey) ([]b
 	return rsa.DecryptOAEP(sha256.New(), rand.Reader, privKey, data, nil)
 }
 
+// getAuthChallenge solicita um desafio fresco e gera a assinatura
+func (s *EnvwareService) getAuthChallenge(pubStr string, privKey *rsa.PrivateKey) (string, error) {
+	challReq, _ := json.Marshal(ChallengeRequest{PublicKey: pubStr})
+	resp, err := http.Post(s.BaseURL+"/auth/challenge", "application/json", bytes.NewBuffer(challReq))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("server returned %d", resp.StatusCode)
+	}
+
+	var challResp ChallengeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&challResp); err != nil {
+		return "", err
+	}
+
+	if challResp.Challenge == "" {
+		return "", fmt.Errorf("empty challenge")
+	}
+
+	hashed := sha256.Sum256([]byte(challResp.Challenge))
+	sig, err := rsa.SignPKCS1v15(rand.Reader, privKey, crypto.SHA256, hashed[:])
+	if err != nil {
+		return "", err
+	}
+
+	return base64.StdEncoding.EncodeToString(sig), nil
+}
+
 func main() {
 	color.New(color.FgCyan, color.Bold).Println("🌸 envware-go ENGINE v2.0.1")
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: ./envw-go <command> [args...]")
+		fmt.Println("Usage: envw <command> [args...]")
 		return
 	}
 
@@ -249,7 +280,6 @@ func main() {
 		return
 	}
 
-	// --- 1. Preparar Chaves (Sem Auth Global) ---
 	pemBlock, _ := pem.Decode([]byte(privStr))
 	var privKey *rsa.PrivateKey
 	if key, err := x509.ParsePKCS1PrivateKey(pemBlock.Bytes); err == nil {
@@ -258,8 +288,6 @@ func main() {
 		pk8, _ := x509.ParsePKCS8PrivateKey(pemBlock.Bytes)
 		privKey = pk8.(*rsa.PrivateKey)
 	}
-
-	// --- 2. Lógica de Comandos ---
 
 	switch action {
 	case "push":
@@ -273,27 +301,26 @@ func main() {
 			environment = os.Args[4]
 		}
 
-		// --- Re-Auth para novo Challenge (evitar Expired) ---
 		fmt.Print("🔐 Auth... ")
-		challReqP, _ := json.Marshal(ChallengeRequest{PublicKey: pubStr})
-		respP, _ := http.Post(service.BaseURL+"/auth/challenge", "application/json", bytes.NewBuffer(challReqP))
-		var challRespP ChallengeResponse
-		json.NewDecoder(respP.Body).Decode(&challRespP)
-		respP.Body.Close()
-
-		hashedP := sha256.Sum256([]byte(challRespP.Challenge))
-		sigP, _ := rsa.SignPKCS1v15(rand.Reader, privKey, crypto.SHA256, hashedP[:])
-		signaturePush := base64.StdEncoding.EncodeToString(sigP)
+		signature, err := service.getAuthChallenge(pubStr, privKey)
+		if err != nil {
+			color.Red("Fail: %v", err)
+			return
+		}
 		color.Green("OK!")
 
-		pullReq, _ := json.Marshal(PullRequest{PublicKey: pubStr, Signature: signaturePush, TeamSlug: team, ProjectSlug: project, Environment: environment})
-		respPull, _ := http.Post(service.BaseURL+"/pull-secrets", "application/json", bytes.NewBuffer(pullReq))
+		pullReq, _ := json.Marshal(PullRequest{PublicKey: pubStr, Signature: signature, TeamSlug: team, ProjectSlug: project, Environment: environment})
+		respPull, err := http.Post(service.BaseURL+"/pull-secrets", "application/json", bytes.NewBuffer(pullReq))
+		if err != nil {
+			color.Red("Server Offline")
+			return
+		}
 		var pullResp CommonResponse
 		json.NewDecoder(respPull.Body).Decode(&pullResp)
 		respPull.Body.Close()
 
 		if !pullResp.Success {
-			color.Red("Error: You don't have access to this project. 🌸")
+			color.Red("Error: %s 🌸", pullResp.Error)
 			return
 		}
 
@@ -308,23 +335,22 @@ func main() {
 		} else {
 			color.Yellow("Project not initialized. Initializing E2EE... 🛡️")
 
-			// --- Re-Auth para novo Challenge (evitar Expired) ---
 			fmt.Print("🔐 Re-Auth for Key Init... ")
-			challReq, _ := json.Marshal(ChallengeRequest{PublicKey: pubStr})
-			resp, _ := http.Post(service.BaseURL+"/auth/challenge", "application/json", bytes.NewBuffer(challReq))
-			var challResp2 ChallengeResponse
-			json.NewDecoder(resp.Body).Decode(&challResp2)
-			resp.Body.Close()
-
-			hashed2 := sha256.Sum256([]byte(challResp2.Challenge))
-			sig2, _ := rsa.SignPKCS1v15(rand.Reader, privKey, crypto.SHA256, hashed2[:])
-			signature2 := base64.StdEncoding.EncodeToString(sig2)
+			signature2, err := service.getAuthChallenge(pubStr, privKey)
+			if err != nil {
+				color.Red("Fail: %v", err)
+				return
+			}
 			color.Green("OK!")
 
 			keyInitReq, _ := json.Marshal(ApproveRequest{
 				PublicKey: pubStr, Signature: signature2, TeamSlug: team, ProjectSlug: project,
 			})
-			respInit, _ := http.Post(service.BaseURL+"/projects/keys", "application/json", bytes.NewBuffer(keyInitReq))
+			respInit, err := http.Post(service.BaseURL+"/projects/keys", "application/json", bytes.NewBuffer(keyInitReq))
+			if err != nil {
+				color.Red("Server Offline")
+				return
+			}
 			var keyResp CommonResponse
 			json.NewDecoder(respInit.Body).Decode(&keyResp)
 			respInit.Body.Close()
@@ -351,17 +377,12 @@ func main() {
 			secrets = append(secrets, s)
 		}
 
-		// --- Re-Auth para novo Challenge (evitar Expired no push final) ---
 		fmt.Print("🔐 Finalizing Push... ")
-		challReq3, _ := json.Marshal(ChallengeRequest{PublicKey: pubStr})
-		resp3, _ := http.Post(service.BaseURL+"/auth/challenge", "application/json", bytes.NewBuffer(challReq3))
-		var challResp3 ChallengeResponse
-		json.NewDecoder(resp3.Body).Decode(&challResp3)
-		resp3.Body.Close()
-
-		hashed3 := sha256.Sum256([]byte(challResp3.Challenge))
-		sig3, _ := rsa.SignPKCS1v15(rand.Reader, privKey, crypto.SHA256, hashed3[:])
-		signature3 := base64.StdEncoding.EncodeToString(sig3)
+		signature3, err := service.getAuthChallenge(pubStr, privKey)
+		if err != nil {
+			color.Red("Fail: %v", err)
+			return
+		}
 		color.Green("OK!")
 
 		pushReq := PushRequest{
@@ -369,8 +390,11 @@ func main() {
 			Environment: environment, Secrets: secrets,
 		}
 		reqBody, _ := json.Marshal(pushReq)
-		respPush, _ := http.Post(service.BaseURL+"/secrets/push", "application/json", bytes.NewBuffer(reqBody))
-
+		respPush, err := http.Post(service.BaseURL+"/secrets/push", "application/json", bytes.NewBuffer(reqBody))
+		if err != nil {
+			color.Red("Server Offline")
+			return
+		}
 		body, _ := io.ReadAll(respPush.Body)
 		var finalResp CommonResponse
 		json.Unmarshal(body, &finalResp)
@@ -392,27 +416,26 @@ func main() {
 			environment = os.Args[4]
 		}
 
-		// --- Re-Auth para novo Challenge (evitar Expired) ---
 		fmt.Print("🔐 Auth... ")
-		challReq, _ := json.Marshal(ChallengeRequest{PublicKey: pubStr})
-		resp, _ := http.Post(service.BaseURL+"/auth/challenge", "application/json", bytes.NewBuffer(challReq))
-		var challResp ChallengeResponse
-		json.NewDecoder(resp.Body).Decode(&challResp)
-		resp.Body.Close()
-
-		hashed := sha256.Sum256([]byte(challResp.Challenge))
-		sig, _ := rsa.SignPKCS1v15(rand.Reader, privKey, crypto.SHA256, hashed[:])
-		signaturePull := base64.StdEncoding.EncodeToString(sig)
+		signature, err := service.getAuthChallenge(pubStr, privKey)
+		if err != nil {
+			color.Red("Fail: %v", err)
+			return
+		}
 		color.Green("OK!")
 
-		pullReq, _ := json.Marshal(PullRequest{PublicKey: pubStr, Signature: signaturePull, TeamSlug: team, ProjectSlug: project, Environment: environment})
-		resp, _ = http.Post(service.BaseURL+"/pull-secrets", "application/json", bytes.NewBuffer(pullReq))
+		pullReq, _ := json.Marshal(PullRequest{PublicKey: pubStr, Signature: signature, TeamSlug: team, ProjectSlug: project, Environment: environment})
+		resp, err := http.Post(service.BaseURL+"/pull-secrets", "application/json", bytes.NewBuffer(pullReq))
+		if err != nil {
+			color.Red("Server Offline")
+			return
+		}
 		var pullResp CommonResponse
 		json.NewDecoder(resp.Body).Decode(&pullResp)
 		resp.Body.Close()
 
-		if !pullResp.Success || len(pullResp.Secrets) == 0 {
-			color.Red("Error: No secrets found for %s/%s in environment %s. 🌸", team, project, environment)
+		if !pullResp.Success || (len(pullResp.Secrets) == 0 && pullResp.EncryptedProjectKey == "") {
+			color.Red("Error: %s 🌸", pullResp.Error)
 			return
 		}
 
@@ -446,20 +469,15 @@ func main() {
 			projectSlug = os.Args[3]
 		}
 
-		// --- Auth Fresco para Status ---
 		fmt.Print("🔐 Auth... ")
-		challReqS, _ := json.Marshal(ChallengeRequest{PublicKey: pubStr})
-		respS, _ := http.Post(service.BaseURL+"/auth/challenge", "application/json", bytes.NewBuffer(challReqS))
-		var challRespS ChallengeResponse
-		json.NewDecoder(respS.Body).Decode(&challRespS)
-		respS.Body.Close()
-
-		hashedS := sha256.Sum256([]byte(challRespS.Challenge))
-		sigS, _ := rsa.SignPKCS1v15(rand.Reader, privKey, crypto.SHA256, hashedS[:])
-		signatureStatus := base64.StdEncoding.EncodeToString(sigS)
+		signature, err := service.getAuthChallenge(pubStr, privKey)
+		if err != nil {
+			color.Red("Fail: %v", err)
+			return
+		}
 		color.Green("OK!")
 
-		statReq, _ := json.Marshal(StatusRequest{PublicKey: pubStr, Signature: signatureStatus, TeamSlug: teamSlug, ProjectSlug: projectSlug})
+		statReq, _ := json.Marshal(StatusRequest{PublicKey: pubStr, Signature: signature, TeamSlug: teamSlug, ProjectSlug: projectSlug})
 		resp, err := http.Post(service.BaseURL+"/team-stats", "application/json", bytes.NewBuffer(statReq))
 		if err != nil {
 			color.Red("Fail: %v", err)
@@ -493,33 +511,23 @@ func main() {
 		userName, _ := reader.ReadString('\n')
 		hostname, _ := os.Hostname()
 
-		// --- Auth Fresco para Request ---
 		fmt.Print("🔐 Auth... ")
-		challReqR, _ := json.Marshal(ChallengeRequest{PublicKey: pubStr})
-		respAuth, err := http.Post(service.BaseURL+"/auth/challenge", "application/json", bytes.NewBuffer(challReqR))
+		signature, err := service.getAuthChallenge(pubStr, privKey)
 		if err != nil {
-			color.Red("Fail: API Offline")
+			color.Red("Fail: %v", err)
 			return
 		}
-		var challRespR ChallengeResponse
-		json.NewDecoder(respAuth.Body).Decode(&challRespR)
-		respAuth.Body.Close()
-
-		if challRespR.Challenge == "" {
-			color.Red("Fail: Could not get challenge from server")
-			return
-		}
-
-		hashedR := sha256.Sum256([]byte(challRespR.Challenge))
-		sigR, _ := rsa.SignPKCS1v15(rand.Reader, privKey, crypto.SHA256, hashedR[:])
-		signatureRequest := base64.StdEncoding.EncodeToString(sigR)
 		color.Green("OK!")
 
 		reqData, _ := json.Marshal(AccessRequest{
-			PublicKey: pubStr, Signature: signatureRequest, TeamSlug: team, ProjectSlug: project, Role: role,
+			PublicKey: pubStr, Signature: signature, TeamSlug: team, ProjectSlug: project, Role: role,
 			UserName: strings.TrimSpace(userName), DeviceAlias: hostname,
 		})
-		respReq, _ := http.Post(service.BaseURL+"/request-access", "application/json", bytes.NewBuffer(reqData))
+		respReq, err := http.Post(service.BaseURL+"/request-access", "application/json", bytes.NewBuffer(reqData))
+		if err != nil {
+			color.Red("Server Offline")
+			return
+		}
 		var res CommonResponse
 		json.NewDecoder(respReq.Body).Decode(&res)
 		respReq.Body.Close()
@@ -536,21 +544,20 @@ func main() {
 		}
 		team, project := os.Args[2], os.Args[3]
 
-		// --- Auth Fresco para Envs ---
 		fmt.Print("🔐 Auth... ")
-		challReqE, _ := json.Marshal(ChallengeRequest{PublicKey: pubStr})
-		respE, _ := http.Post(service.BaseURL+"/auth/challenge", "application/json", bytes.NewBuffer(challReqE))
-		var challRespE ChallengeResponse
-		json.NewDecoder(respE.Body).Decode(&challRespE)
-		respE.Body.Close()
-
-		hashedE := sha256.Sum256([]byte(challRespE.Challenge))
-		sigE, _ := rsa.SignPKCS1v15(rand.Reader, privKey, crypto.SHA256, hashedE[:])
-		signatureEnvs := base64.StdEncoding.EncodeToString(sigE)
+		signature, err := service.getAuthChallenge(pubStr, privKey)
+		if err != nil {
+			color.Red("Fail: %v", err)
+			return
+		}
 		color.Green("OK!")
 
-		envReq, _ := json.Marshal(StatusRequest{PublicKey: pubStr, Signature: signatureEnvs, TeamSlug: team, ProjectSlug: project})
-		respEnvs, _ := http.Post(service.BaseURL+"/projects/envs", "application/json", bytes.NewBuffer(envReq))
+		envReq, _ := json.Marshal(StatusRequest{PublicKey: pubStr, Signature: signature, TeamSlug: team, ProjectSlug: project})
+		respEnvs, err := http.Post(service.BaseURL+"/projects/envs", "application/json", bytes.NewBuffer(envReq))
+		if err != nil {
+			color.Red("Server Offline")
+			return
+		}
 		var finalResp CommonResponse
 		json.NewDecoder(respEnvs.Body).Decode(&finalResp)
 		respEnvs.Body.Close()
@@ -576,21 +583,20 @@ func main() {
 		}
 		team := os.Args[2]
 
-		// --- Auth Fresco para Projects ---
 		fmt.Print("🔐 Auth... ")
-		challReqProj, _ := json.Marshal(ChallengeRequest{PublicKey: pubStr})
-		respProj, _ := http.Post(service.BaseURL+"/auth/challenge", "application/json", bytes.NewBuffer(challReqProj))
-		var challRespProj ChallengeResponse
-		json.NewDecoder(respProj.Body).Decode(&challRespProj)
-		respProj.Body.Close()
-
-		hashedProj := sha256.Sum256([]byte(challRespProj.Challenge))
-		sigProj, _ := rsa.SignPKCS1v15(rand.Reader, privKey, crypto.SHA256, hashedProj[:])
-		signatureProjects := base64.StdEncoding.EncodeToString(sigProj)
+		signature, err := service.getAuthChallenge(pubStr, privKey)
+		if err != nil {
+			color.Red("Fail: %v", err)
+			return
+		}
 		color.Green("OK!")
 
-		projListReq, _ := json.Marshal(StatusRequest{PublicKey: pubStr, Signature: signatureProjects, TeamSlug: team})
-		respList, _ := http.Post(service.BaseURL+"/projects", "application/json", bytes.NewBuffer(projListReq))
+		projListReq, _ := json.Marshal(StatusRequest{PublicKey: pubStr, Signature: signature, TeamSlug: team})
+		respList, err := http.Post(service.BaseURL+"/projects", "application/json", bytes.NewBuffer(projListReq))
+		if err != nil {
+			color.Red("Server Offline")
+			return
+		}
 		var finalResp CommonResponse
 		json.NewDecoder(respList.Body).Decode(&finalResp)
 		respList.Body.Close()
@@ -620,21 +626,20 @@ func main() {
 			environment = os.Args[4]
 		}
 
-		// --- Auth Fresco para Secrets ---
 		fmt.Print("🔐 Auth... ")
-		challReqSec, _ := json.Marshal(ChallengeRequest{PublicKey: pubStr})
-		respSec, _ := http.Post(service.BaseURL+"/auth/challenge", "application/json", bytes.NewBuffer(challReqSec))
-		var challRespSec ChallengeResponse
-		json.NewDecoder(respSec.Body).Decode(&challRespSec)
-		respSec.Body.Close()
-
-		hashedSec := sha256.Sum256([]byte(challRespSec.Challenge))
-		sigSec, _ := rsa.SignPKCS1v15(rand.Reader, privKey, crypto.SHA256, hashedSec[:])
-		signatureSecrets := base64.StdEncoding.EncodeToString(sigSec)
+		signature, err := service.getAuthChallenge(pubStr, privKey)
+		if err != nil {
+			color.Red("Fail: %v", err)
+			return
+		}
 		color.Green("OK!")
 
-		pullReq, _ := json.Marshal(PullRequest{PublicKey: pubStr, Signature: signatureSecrets, TeamSlug: team, ProjectSlug: project, Environment: environment})
-		respP, _ := http.Post(service.BaseURL+"/pull-secrets", "application/json", bytes.NewBuffer(pullReq))
+		pullReq, _ := json.Marshal(PullRequest{PublicKey: pubStr, Signature: signature, TeamSlug: team, ProjectSlug: project, Environment: environment})
+		respP, err := http.Post(service.BaseURL+"/pull-secrets", "application/json", bytes.NewBuffer(pullReq))
+		if err != nil {
+			color.Red("Server Offline")
+			return
+		}
 		var pullResp CommonResponse
 		json.NewDecoder(respP.Body).Decode(&pullResp)
 		respP.Body.Close()
@@ -655,23 +660,21 @@ func main() {
 			return
 		}
 
-		// --- Auth Fresco ---
-		fmt.Print("🔐 Auth... ")
-		challReqA, _ := json.Marshal(ChallengeRequest{PublicKey: pubStr})
-		respA, _ := http.Post(service.BaseURL+"/auth/challenge", "application/json", bytes.NewBuffer(challReqA))
-		var challRespA ChallengeResponse
-		json.NewDecoder(respA.Body).Decode(&challRespA)
-		respA.Body.Close()
-
-		hashedA := sha256.Sum256([]byte(challRespA.Challenge))
-		sigA, _ := rsa.SignPKCS1v15(rand.Reader, privKey, crypto.SHA256, hashedA[:])
-		signatureA := base64.StdEncoding.EncodeToString(sigA)
-		color.Green("OK!")
-
 		if len(os.Args) == 2 {
-			// Listar pedidos pendentes
-			listReq, _ := json.Marshal(StatusRequest{PublicKey: pubStr, Signature: signatureA})
-			respL, _ := http.Post(service.BaseURL+"/projects/requests/pending", "application/json", bytes.NewBuffer(listReq))
+			fmt.Print("🔐 Auth... ")
+			signature, err := service.getAuthChallenge(pubStr, privKey)
+			if err != nil {
+				color.Red("Fail: %v", err)
+				return
+			}
+			color.Green("OK!")
+
+			listReq, _ := json.Marshal(StatusRequest{PublicKey: pubStr, Signature: signature})
+			respL, err := http.Post(service.BaseURL+"/projects/requests/pending", "application/json", bytes.NewBuffer(listReq))
+			if err != nil {
+				color.Red("Server Offline")
+				return
+			}
 			var listResp CommonResponse
 			json.NewDecoder(respL.Body).Decode(&listResp)
 			respL.Body.Close()
@@ -690,12 +693,18 @@ func main() {
 				fmt.Printf("🚀 Project: %s/%s (%s)\n", req.TeamSlug, req.ProjectSlug, req.Role)
 				fmt.Printf("🛡️  Fingerprint: SHA256:%s\n", fingerprint)
 			}
-			fmt.Printf("\nRun \"./envw-go accept <id>\" to grant access. 🌸\n")
+			fmt.Printf("\nRun \"envw accept <id>\" to grant access. 🌸\n")
 		} else {
-			// Aprovar um pedido específico
 			requestId := os.Args[2]
 
-			// 1. Buscar detalhes do request
+			fmt.Print("🔐 Auth... ")
+			signatureA, err := service.getAuthChallenge(pubStr, privKey)
+			if err != nil {
+				color.Red("Fail: %v", err)
+				return
+			}
+			color.Green("OK!")
+
 			fmt.Print("🔍 Checking request details... ")
 			listReq, _ := json.Marshal(StatusRequest{PublicKey: pubStr, Signature: signatureA})
 			respL, _ := http.Post(service.BaseURL+"/projects/requests/pending", "application/json", bytes.NewBuffer(listReq))
@@ -717,19 +726,13 @@ func main() {
 				return
 			}
 
-			// 2. Pegar a ProjectKey local
 			fmt.Printf("📥 Fetching project key for %s/%s... ", targetRequest.TeamSlug, targetRequest.ProjectSlug)
 
-			// --- Re-Auth para novo Challenge (PULL) ---
-			challReqP2, _ := json.Marshal(ChallengeRequest{PublicKey: pubStr})
-			respP2, _ := http.Post(service.BaseURL+"/auth/challenge", "application/json", bytes.NewBuffer(challReqP2))
-			var challRespP2 ChallengeResponse
-			json.NewDecoder(respP2.Body).Decode(&challRespP2)
-			respP2.Body.Close()
-
-			hashedP2 := sha256.Sum256([]byte(challRespP2.Challenge))
-			sigP2, _ := rsa.SignPKCS1v15(rand.Reader, privKey, crypto.SHA256, hashedP2[:])
-			signatureP2 := base64.StdEncoding.EncodeToString(sigP2)
+			signatureP2, err := service.getAuthChallenge(pubStr, privKey)
+			if err != nil {
+				color.Red("Fail (Auth): %v", err)
+				return
+			}
 
 			pullReq, _ := json.Marshal(PullRequest{
 				PublicKey: pubStr, Signature: signatureP2,
@@ -744,7 +747,6 @@ func main() {
 			if !pullResp.Success || pullResp.EncryptedProjectKey == "" {
 				color.Red("FAIL!")
 				color.Red("Error: You don't have the project key to share. Push first. 🌸")
-				fmt.Printf("Debug Server Response: Success=%v, Error=%s, KeyEmpty=%v\n", pullResp.Success, pullResp.Error, pullResp.EncryptedProjectKey == "")
 				return
 			}
 			color.Green("OK!")
@@ -752,18 +754,20 @@ func main() {
 			projectKeyBytes, _ := service.RSADecrypt(pullResp.EncryptedProjectKey, privKey)
 			projectKey := string(projectKeyBytes)
 
-			// 3. Encriptar a chave para o destinatário
 			fmt.Print("🛡️  Encrypting key for recipient... ")
 			encryptBody, _ := json.Marshal(map[string]string{
 				"publicKey": targetRequest.PublicKey,
 				"plainText": projectKey,
 			})
 
-			// Nota: O PUT em verify-go não exige challenge (ponte interna segura)
 			reqE, _ := http.NewRequest("PUT", service.BaseURL+"/auth/verify-go", bytes.NewBuffer(encryptBody))
 			reqE.Header.Set("Content-Type", "application/json")
 			client := &http.Client{}
-			respE, _ := client.Do(reqE)
+			respE, err := client.Do(reqE)
+			if err != nil {
+				color.Red("Server Offline")
+				return
+			}
 			var encData struct {
 				Success       bool
 				EncryptedData string
@@ -777,18 +781,12 @@ func main() {
 			}
 			color.Green("OK!")
 
-			// 4. Enviar aprovação
 			fmt.Print("🚀 Sending approval... ")
-			// --- Re-Auth para novo Challenge (APPROVE) ---
-			challReqApp, _ := json.Marshal(ChallengeRequest{PublicKey: pubStr})
-			respCApp, _ := http.Post(service.BaseURL+"/auth/challenge", "application/json", bytes.NewBuffer(challReqApp))
-			var challRespApp ChallengeResponse
-			json.NewDecoder(respCApp.Body).Decode(&challRespApp)
-			respCApp.Body.Close()
-
-			hashedApp := sha256.Sum256([]byte(challRespApp.Challenge))
-			sigApp, _ := rsa.SignPKCS1v15(rand.Reader, privKey, crypto.SHA256, hashedApp[:])
-			signatureApp := base64.StdEncoding.EncodeToString(sigApp)
+			signatureApp, err := service.getAuthChallenge(pubStr, privKey)
+			if err != nil {
+				color.Red("Fail (Auth): %v", err)
+				return
+			}
 
 			approveReq, _ := json.Marshal(ApproveRequest{
 				PublicKey: pubStr, Signature: signatureApp, RequestId: requestId, EncryptedProjectKey: encData.EncryptedData,
