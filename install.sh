@@ -6,7 +6,7 @@
 
 set -e
 
-REPO="envware/envware-go" # TODO: Altere para o seu repositório oficial no GitHub
+REPO="envware/envware-go" # Nome oficial do repositório
 BINARY_NAME="envw"
 
 # 1. Detectar OS e Arquitetura
@@ -25,14 +25,18 @@ LATEST_TAG=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | grep
 
 if [ -z "$LATEST_TAG" ]; then
     echo "❌ Could not find latest release. Please check the repository: https://github.com/$REPO"
+    echo "💡 Make sure you have created at least one Release on GitHub!"
     exit 1
 fi
 
 echo "🚀 Downloading envware $LATEST_TAG for $OS ($ARCH)..."
 
-# 3. Nome do arquivo (Ajuste conforme o padrão do seu release)
-# Exemplo: envware-darwin-arm64
+# 3. Nome do arquivo (Seguindo o padrão do build-all.sh)
 FILENAME="envware-$OS-$ARCH"
+if [ "$OS" = "windows" ]; then
+    FILENAME="$FILENAME.exe"
+fi
+
 URL="https://github.com/$REPO/releases/download/$LATEST_TAG/$FILENAME"
 
 # 4. Download
@@ -49,5 +53,5 @@ fi
 
 echo ""
 echo "🌸 envware 2.0 (Go Engine) installed successfully!"
-echo "✨ Run 'envw status' to get started."
+echo "✨ Run 'envw status <team>' to get started."
 echo "🚀 Welcome to the Zero-Trust future."
