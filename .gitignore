@@ -1,0 +1,17 @@
+# Binaries
+envw
+envw-go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Environment variables (CRITICAL: DO NOT COMMIT)
+.env
+.env.*
+!.env.example
+
+# Go
+vendor/
+go.sum (optional, but usually kept)
