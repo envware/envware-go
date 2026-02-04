@@ -6,7 +6,7 @@
 
 set -e
 
-REPO="envware/envware-go" # TODO: Altere para o seu repositório oficial no GitHub
+REPO="betocruz/envware-go" # TODO: Altere para o seu repositório oficial no GitHub
 BINARY_NAME="envw"
 
 # 1. Detectar OS e Arquitetura

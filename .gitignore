@@ -1,7 +1,7 @@
 # Binaries
 envw
 envw-go
-*.exe
+# *.exe <-- Removido para permitir o binário de windows no git se necessário (mas o ideal é Release)
 *.exe~
 *.dll
 *.so
