@@ -120,6 +120,7 @@ type TeamInfo struct {
 	Name               string            `json:"name"`
 	Slug               string            `json:"slug"`
 	IsPremium          bool              `json:"isPremium"`
+	IsVerified         bool              `json:"isVerified"`
 	MaxProjects        int               `json:"maxProjects"`
 	ProjectsCount      int               `json:"projectsCount"`
 	MaxUsersPerProject int               `json:"maxUsersPerProject"`
@@ -487,8 +488,15 @@ func main() {
 		json.NewDecoder(resp.Body).Decode(&finalResp)
 		resp.Body.Close()
 		if finalResp.Success {
+			if finalResp.Message != "" {
+				color.Yellow("\n%s\n", finalResp.Message)
+			}
 			if finalResp.Team != nil {
-				fmt.Printf("\n🏢 TEAM: %s\n", finalResp.Team.Name)
+				fmt.Printf("\n🏢 TEAM: %s", finalResp.Team.Name)
+				if !finalResp.Team.IsVerified {
+					color.Yellow(" [UNDER VERIFICATION]")
+				}
+				fmt.Println()
 				for _, p := range finalResp.Team.Projects {
 					fmt.Printf("  - %s (%s)\n", p.Name, p.Slug)
 				}
