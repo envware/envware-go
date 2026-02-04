@@ -69,15 +69,26 @@ envw push team1 project1
 envw pull team1 project1
 ```
 
-## Security Model
+## Security Model (The "Master Key" Logic)
 
-Envware uses a dual-key E2EE system:
-1. **User Identity:** Derived from your local SSH public key (`~/.ssh/id_rsa`).
-2. **Project Key:** A unique AES-256 key generated for each project.
-3. **Storage:** The server only stores "encrypted blobs". The Project Key is stored encrypted with your SSH Public Key.
+Envware uses a **dual-key E2EE architecture** to ensure that plain text secrets never touch our infrastructure.
 
-### Challenge-Response Auth
-Unlike traditional CLIs using long-lived JWTs, `envware-go` uses a challenge-response mechanism for every sensitive operation. The server issues a unique challenge, and the CLI signs it using your private SSH key.
+### 1. The Project Key (The Master Code)
+When a project is initialized, a unique **Project Key** (AES-256) is generated locally on your machine. This is the "Master Code" that locks and unlocks your `.env` files.
+
+### 2. Secure Envelopes (RSA-OAEP)
+To store this Project Key on our server without us ever seeing it, we use your **SSH Public Key** to create a "Secure Envelope" around it.
+*   **The Server** only sees a sealed envelope.
+*   **Only Your Private SSH Key** can open that envelope to retrieve the Master Code.
+
+### 3. How Teams Share Access
+When you approve a new member (`envw accept`):
+1.  Your CLI downloads **your** envelope and opens it using your private key.
+2.  It retrieves the **Master Code** (locally, in memory).
+3.  It creates a **new envelope** using the **new member's public key**.
+4.  The server now stores a second envelope. Same Master Code, but different lock.
+
+**Result:** Every team member has their own "copy" of the Master Code, but each copy is locked with their unique SSH identity. If the server is compromised, the attacker only finds millions of sealed envelopes they cannot open. 🛡️🌸
 
 ---
 
