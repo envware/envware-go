@@ -92,6 +92,19 @@ type ProjectListItem struct {
 	SecretsCount int    `json:"secretsCount"`
 }
 
+type TeamSummary struct {
+	Name          string `json:"name"`
+	Slug          string `json:"slug"`
+	ProjectsCount int    `json:"projectsCount"`
+	Role          string `json:"role"`
+}
+
+type UserStats struct {
+	Name  string        `json:"name"`
+	Email string        `json:"email"`
+	Teams []TeamSummary `json:"teams"`
+}
+
 type CommonResponse struct {
 	Success             bool              `json:"success"`
 	Message             string            `json:"message"`
@@ -101,6 +114,7 @@ type CommonResponse struct {
 	EncryptedProjectKey string            `json:"encryptedProjectKey,omitempty"`
 	Team                *TeamInfo         `json:"team,omitempty"`
 	Project             *ProjectInfo      `json:"project,omitempty"`
+	User                *UserStats        `json:"user,omitempty"`
 	Requests            []PendingRequest  `json:"requests,omitempty"`
 	Error               string            `json:"error,omitempty"`
 }
@@ -267,7 +281,7 @@ func (s *EnvwareService) getAuthChallenge(pubStr string, privKey *rsa.PrivateKey
 }
 
 func main() {
-	color.New(color.FgCyan, color.Bold).Println("🌸 envware-go ENGINE v2.0.2")
+	color.New(color.FgCyan, color.Bold).Println("🌸 envware-go ENGINE v2.0.3")
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: envw <command> [args...]")
 		return
@@ -461,10 +475,10 @@ func main() {
 		color.Green("✔ %s updated! 💎", environment)
 
 	case "status":
-		if len(os.Args) < 3 {
-			return
+		teamSlug := ""
+		if len(os.Args) >= 3 {
+			teamSlug = os.Args[2]
 		}
-		teamSlug := os.Args[2]
 		projectSlug := ""
 		if len(os.Args) >= 4 {
 			projectSlug = os.Args[3]
@@ -490,6 +504,18 @@ func main() {
 		if finalResp.Success {
 			if finalResp.Message != "" {
 				color.Yellow("\n%s\n", finalResp.Message)
+			}
+			if finalResp.User != nil {
+				fmt.Printf("\n👤 USER: %s (%s)\n", finalResp.User.Name, finalResp.User.Email)
+				if len(finalResp.User.Teams) == 0 {
+					color.Yellow("  No teams found for this user.")
+				} else {
+					fmt.Println("🏢 TEAMS:")
+					for _, t := range finalResp.User.Teams {
+						fmt.Printf("  - %s (%s) | %d projects | Role: %s\n", t.Name, t.Slug, t.ProjectsCount, t.Role)
+					}
+				}
+				fmt.Println("\nRun \"envw status <team-slug>\" for more info. 🌸")
 			}
 			if finalResp.Team != nil {
 				fmt.Printf("\n🏢 TEAM: %s", finalResp.Team.Name)
