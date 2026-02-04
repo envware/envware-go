@@ -235,7 +235,7 @@ func (s *EnvwareService) RSADecrypt(encStr string, privKey *rsa.PrivateKey) ([]b
 }
 
 func main() {
-	color.New(color.FgCyan, color.Bold).Println("🌸 envware-go ENGINE v2.0.0-alpha")
+	color.New(color.FgCyan, color.Bold).Println("🌸 envware-go ENGINE v2.0.1")
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: ./envw-go <command> [args...]")
 		return
