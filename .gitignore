@@ -6,6 +6,7 @@ envw-go
 *.dll
 *.so
 *.dylib
+dist/
 
 # Environment variables (CRITICAL: DO NOT COMMIT)
 .env
