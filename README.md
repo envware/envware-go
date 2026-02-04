@@ -29,28 +29,44 @@ Stop sharing `.env` files via Slack, DMs, or insecure notes. Envware ensures you
 - **`secrets <team> <project> [env-file]`**: List secret keys (names only) in an environment.
 - **`status <team> [project]`**: Check team and project details.
 
-## Quick Start
+## Installation
 
-### 1. Build the CLI
+The quickest way to install Envware 2.0 is via our installation script:
+
+```bash
+curl -sSL https://www.envware.dev/install.sh | bash
+```
+
+### Other options
+
+#### Via Go
+```bash
+go install github.com/envware/envware-go@latest
+```
+*Note: Make sure your `$GOPATH/bin` is in your PATH.*
+
+### 2. Or Build from Source
 ```bash
 go build -o envw main.go
+# Move to your local bin to use it globally:
+sudo mv envw /usr/local/bin/
 ```
 
-### 2. Request Access or Create Project
+### 3. Request Access or Create Project
 ```bash
-./envw request team1 project1 OWNER
+envw request team1 project1 OWNER
 ```
 
-### 3. Push Secrets
+### 4. Push Secrets
 ```bash
 # Uploads .env by default
-./envw push team1 project1
+envw push team1 project1
 ```
 
-### 4. Pull Secrets
+### 5. Pull Secrets
 ```bash
 # Downloads and decrypts
-./envw pull team1 project1
+envw pull team1 project1
 ```
 
 ## Security Model
