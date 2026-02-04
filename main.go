@@ -496,10 +496,19 @@ func main() {
 		// --- Auth Fresco para Request ---
 		fmt.Print("🔐 Auth... ")
 		challReqR, _ := json.Marshal(ChallengeRequest{PublicKey: pubStr})
-		respR, _ := http.Post(service.BaseURL+"/auth/challenge", "application/json", bytes.NewBuffer(challReqR))
+		respAuth, err := http.Post(service.BaseURL+"/auth/challenge", "application/json", bytes.NewBuffer(challReqR))
+		if err != nil {
+			color.Red("Fail: API Offline")
+			return
+		}
 		var challRespR ChallengeResponse
-		json.NewDecoder(respR.Body).Decode(&challRespR)
-		respR.Body.Close()
+		json.NewDecoder(respAuth.Body).Decode(&challRespR)
+		respAuth.Body.Close()
+
+		if challRespR.Challenge == "" {
+			color.Red("Fail: Could not get challenge from server")
+			return
+		}
 
 		hashedR := sha256.Sum256([]byte(challRespR.Challenge))
 		sigR, _ := rsa.SignPKCS1v15(rand.Reader, privKey, crypto.SHA256, hashedR[:])
