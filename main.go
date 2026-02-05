@@ -839,6 +839,59 @@ func main() {
 			}
 		}
 
+	case "purchase":
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: purchase <category> <team-slug> [action]")
+			fmt.Println("Categories: users, projects")
+			fmt.Println("Actions: add, sub (default: add)")
+			return
+		}
+		category, teamSlug := os.Args[2], os.Args[3]
+		action := "add"
+		if len(os.Args) >= 5 {
+			action = os.Args[4]
+		}
+
+		fmt.Print("🔐 Auth... ")
+		signature, err := service.getAuthChallenge(pubStr, privKey)
+		if err != nil {
+			color.Red("Fail: %v", err)
+			return
+		}
+		color.Green("OK!")
+
+		purReq, _ := json.Marshal(map[string]string{
+			"publicKey": pubStr,
+			"signature": signature,
+			"category":  category,
+			"action":    action,
+			"teamSlug":  teamSlug,
+		})
+
+		resp, err := http.Post(service.BaseURL+"/purchase", "application/json", bytes.NewBuffer(purReq))
+		if err != nil {
+			color.Red("Server Offline")
+			return
+		}
+		defer resp.Body.Close()
+
+		var res struct {
+			Success    bool   `json:"success"`
+			PaymentUrl string `json:"paymentUrl"`
+			Message    string `json:"message"`
+			Error      string `json:"error"`
+		}
+		json.NewDecoder(resp.Body).Decode(&res)
+
+		if res.Success {
+			color.Green("✨ %s", res.Message)
+			if res.PaymentUrl != "" {
+				fmt.Printf("\nPlease complete your payment at:\n%s\n", res.PaymentUrl)
+			}
+		} else {
+			color.Red("Fail: %s", res.Error)
+		}
+
 	default:
 		color.Yellow("Unknown command: %s", action)
 	}
