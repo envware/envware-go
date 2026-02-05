@@ -841,15 +841,32 @@ func main() {
 
 	case "purchase":
 		if len(os.Args) < 3 {
-			fmt.Println("Usage: purchase <category> <team-slug> [action]")
+			fmt.Println("Usage: purchase <category> <team-slug> [project-slug/action] [action]")
 			fmt.Println("Categories: users, projects")
 			fmt.Println("Actions: add, sub (default: add)")
+			fmt.Println("\nExamples:")
+			fmt.Println("  envw purchase users myteam myproject")
+			fmt.Println("  envw purchase projects myteam")
+			fmt.Println("  envw purchase projects myteam sub")
 			return
 		}
 		category, teamSlug := os.Args[2], os.Args[3]
+		projectSlug := ""
 		action := "add"
-		if len(os.Args) >= 5 {
-			action = os.Args[4]
+
+		if category == "users" {
+			if len(os.Args) < 5 {
+				fmt.Println("Usage for users: purchase users <team-slug> <project-slug> [action]")
+				return
+			}
+			projectSlug = os.Args[4]
+			if len(os.Args) >= 6 {
+				action = os.Args[5]
+			}
+		} else {
+			if len(os.Args) >= 5 {
+				action = os.Args[4]
+			}
 		}
 
 		fmt.Print("🔐 Auth... ")
@@ -861,11 +878,12 @@ func main() {
 		color.Green("OK!")
 
 		purReq, _ := json.Marshal(map[string]string{
-			"publicKey": pubStr,
-			"signature": signature,
-			"category":  category,
-			"action":    action,
-			"teamSlug":  teamSlug,
+			"publicKey":   pubStr,
+			"signature":   signature,
+			"category":    category,
+			"action":      action,
+			"teamSlug":    teamSlug,
+			"projectSlug": projectSlug,
 		})
 
 		resp, err := http.Post(service.BaseURL+"/purchase", "application/json", bytes.NewBuffer(purReq))
