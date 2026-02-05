@@ -281,7 +281,7 @@ func (s *EnvwareService) getAuthChallenge(pubStr string, privKey *rsa.PrivateKey
 }
 
 func main() {
-	color.New(color.FgCyan, color.Bold).Println("🌸 envware-go ENGINE v2.0.3")
+	color.New(color.FgCyan, color.Bold).Println("🌸 envware-go ENGINE v2.0.4")
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: envw <command> [args...]")
 		return
