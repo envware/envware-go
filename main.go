@@ -18,7 +18,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/fatih/color"
@@ -437,6 +439,21 @@ func (s *EnvwareService) getAuthChallenge(pubStr string, privKey *rsa.PrivateKey
 	}
 
 	return base64.StdEncoding.EncodeToString(sig), nil
+}
+
+func openInBrowser(url string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "linux":
+		cmd = exec.Command("xdg-open", url)
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "start", url)
+	default:
+		return fmt.Errorf("unsupported platform")
+	}
+	return cmd.Start()
 }
 
 func main() {
@@ -1064,6 +1081,8 @@ func main() {
 			color.Green("✨ %s", res.Message)
 			if res.PaymentUrl != "" {
 				fmt.Printf("\nPlease complete your payment at:\n%s\n", res.PaymentUrl)
+				fmt.Println("Opening browser to complete payment...")
+				openInBrowser(res.PaymentUrl)
 			}
 		} else {
 			color.Red("Fail: %s", res.Error)
