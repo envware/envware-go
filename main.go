@@ -457,7 +457,7 @@ func openInBrowser(url string) error {
 }
 
 func main() {
-	color.New(color.FgCyan, color.Bold).Println("🌸 envware-go ENGINE v2.0.5")
+	color.New(color.FgCyan, color.Bold).Println("🌸 envware-go ENGINE v2.0.6")
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: envw <command> [args...]")
 		return
