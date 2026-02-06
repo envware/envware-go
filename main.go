@@ -25,6 +25,165 @@ import (
 	"golang.org/x/crypto/scrypt"
 )
 
+// --- LLM Documentation ---
+
+const llmsTxt = `# Envware
+
+> Secure environment variable manager with end-to-end encryption (E2EE) using SSH keys.
+
+Envware encrypts secrets locally before syncing. The server never sees plaintext data.
+
+## Quick Start
+
+` + "```" + `bash
+# Install
+curl -sSL https://www.envware.dev/install.sh | bash
+
+# Request access (or create project as OWNER)
+envw request <team> <project> <ROLE>
+
+# Push secrets (encrypts .env locally, uploads ciphertext)
+envw push <team> <project> [env-file]
+
+# Pull secrets (downloads and decrypts)
+envw pull <team> <project> [env-file]
+` + "```" + `
+
+## Core Commands
+
+| Command | Description |
+|---------|-------------|
+| envw request <team> <project> <ROLE> | Request access or create project |
+| envw push <team> <project> [.env] | Encrypt and upload secrets |
+| envw pull <team> <project> [.env] | Download and decrypt secrets |
+| envw status <team> [project] | Show team/project info |
+| envw projects <team> | List projects in a team |
+| envw envs <team> <project> | List environments |
+| envw secrets <team> <project> [env] | List secret keys (names only) |
+| envw accept | List pending access requests |
+| envw accept <id> | Approve access request |
+| envw purchase teams | Buy extra team slot |
+| envw purchase projects <team> | Buy +5 project slots |
+| envw purchase users <team> <project> | Buy +10 user slots |
+
+## Roles
+
+- OWNER: Full control, billing, can approve requests
+- ADMIN: Push, pull, approve access
+- DEV: Pull only
+- CI: Show individual secrets (for pipelines)
+
+## Security Model
+
+- Secrets encrypted with AES-256-GCM using a Project Key
+- Project Key is RSA-encrypted for each user's SSH public key
+- Server only stores encrypted envelopes, never plaintext
+- Access approval re-encrypts Project Key for new member's public key
+
+## Links
+
+- Website: https://www.envware.dev
+- Docs: https://www.envware.dev/docs
+- Install: curl -sSL https://www.envware.dev/install.sh | bash
+`
+
+const llmsFullTxt = `# Envware - Complete LLM Reference
+
+> Secure environment variable manager with end-to-end encryption (E2EE) using SSH keys.
+
+Envware encrypts secrets locally using your SSH identity before syncing. The server never sees plaintext data.
+
+## Installation
+
+` + "```" + `bash
+# Quick install (recommended)
+curl -sSL https://www.envware.dev/install.sh | bash
+
+# Via Go
+go install github.com/envware/envware-go@latest
+` + "```" + `
+
+## Architecture
+
+Hierarchy: User (SSH Identity) -> Teams -> Projects -> Environments -> Secrets
+
+Security Model:
+1. Project Key: Each project has a unique AES-256 key generated locally
+2. Secure Envelopes: Project Key is RSA-OAEP encrypted for each user's SSH public key
+3. Zero-Knowledge Server: Server only stores encrypted envelopes and ciphertext
+4. Fingerprint Verification: SHA256 fingerprints verify user identity
+
+## Commands Reference
+
+### envw request <team> <project> <ROLE>
+Request access to a project or create it (becomes OWNER if first).
+Roles: OWNER, ADMIN, DEV, CI
+
+### envw push <team> <project> [env-file]
+Encrypt and upload secrets. Default: .env
+Examples: envw push myteam myapp .env.production
+
+### envw pull <team> <project> [env-file]
+Download and decrypt secrets. Default: .env
+Examples: envw pull myteam myapp .env.production
+
+### envw status <team> [project]
+Show team details or project users/environments.
+
+### envw projects <team>
+List all projects in a team.
+
+### envw envs <team> <project>
+List all environments in a project.
+
+### envw secrets <team> <project> [env-file]
+List secret keys (names only, not values).
+
+### envw accept
+List pending access requests.
+
+### envw accept <request-id>
+Approve access request (re-encrypts Project Key for new member).
+IMPORTANT: Verify fingerprint out-of-band before approving!
+
+### envw purchase teams
+Buy +1 team slot ($10/month)
+
+### envw purchase projects <team>
+Buy +5 project slots for a team ($10/month)
+
+### envw purchase users <team> <project>
+Buy +10 user slots for a project ($10/month)
+
+## Free Tier Limits
+
+- Teams: 1
+- Projects per Team: 3
+- Users per Project: 5
+
+## Common Workflows
+
+New Project:
+  envw request myteam myapp OWNER
+  envw push myteam myapp
+
+Grant Access:
+  # Teammate runs: envw request myteam myapp DEV
+  # You run: envw accept
+  # Verify fingerprint, then: envw accept <id>
+
+Multiple Environments:
+  envw push myteam myapp .env.development
+  envw push myteam myapp .env.staging
+  envw push myteam myapp .env.production
+
+## Links
+
+- Website: https://www.envware.dev
+- Docs: https://www.envware.dev/docs
+- GitHub: https://github.com/envware/envware-go
+`
+
 // --- Estruturas de Dados ---
 
 type ChallengeRequest struct{ PublicKey string `json:"publicKey"` }
@@ -281,7 +440,7 @@ func (s *EnvwareService) getAuthChallenge(pubStr string, privKey *rsa.PrivateKey
 }
 
 func main() {
-	color.New(color.FgCyan, color.Bold).Println("🌸 envware-go ENGINE v2.0.4")
+	color.New(color.FgCyan, color.Bold).Println("🌸 envware-go ENGINE v2.0.5")
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: envw <command> [args...]")
 		return
@@ -908,6 +1067,40 @@ func main() {
 			}
 		} else {
 			color.Red("Fail: %s", res.Error)
+		}
+
+	case "docs":
+		llmFlag := false
+		fullFlag := false
+		for _, arg := range os.Args[2:] {
+			if arg == "--llm" || arg == "-l" {
+				llmFlag = true
+			}
+			if arg == "--full" || arg == "-f" {
+				fullFlag = true
+			}
+		}
+
+		if llmFlag {
+			if fullFlag {
+				fmt.Println(llmsFullTxt)
+			} else {
+				fmt.Println(llmsTxt)
+			}
+		} else {
+			fmt.Println("📚 Envware Documentation")
+			fmt.Println("")
+			fmt.Println("  Website:  https://www.envware.dev")
+			fmt.Println("  Docs:     https://www.envware.dev/docs")
+			fmt.Println("  GitHub:   https://github.com/envware/envware-go")
+			fmt.Println("")
+			fmt.Println("Options:")
+			fmt.Println("  --llm, -l       Print LLM-friendly documentation (llms.txt)")
+			fmt.Println("  --full, -f      Print full LLM documentation (use with --llm)")
+			fmt.Println("")
+			fmt.Println("Examples:")
+			fmt.Println("  envw docs --llm          # Quick reference for AI assistants")
+			fmt.Println("  envw docs --llm --full   # Complete CLI reference")
 		}
 
 	default:
