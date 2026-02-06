@@ -1122,6 +1122,55 @@ func main() {
 			fmt.Println("  envw docs --llm --full   # Complete CLI reference")
 		}
 
+	case "set-email":
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: set-email <your-email-address>")
+			return
+		}
+		newEmail := os.Args[2]
+
+		fmt.Print("🔐 Auth... ")
+		signature, err := service.getAuthChallenge(pubStr, privKey)
+		if err != nil {
+			color.Red("Fail: %v", err)
+			return
+		}
+		color.Green("OK!")
+
+		updateReq, _ := json.Marshal(map[string]string{
+			"publicKey":   pubStr,
+			"signature":   signature,
+			"newEmail":    newEmail,
+		})
+		
+		req, err := http.NewRequest("PUT", service.BaseURL+"/user/email", bytes.NewBuffer(updateReq))
+		if err != nil {
+			color.Red("Error creating request: %v", err)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			color.Red("Server Offline")
+			return
+		}
+		defer resp.Body.Close()
+
+		var res struct {
+			Success bool   `json:"success"`
+			Message string `json:"message"`
+			Error   string `json:"error"`
+		}
+		json.NewDecoder(resp.Body).Decode(&res)
+
+		if res.Success {
+			color.Green("✨ %s", res.Message)
+		} else {
+			color.Red("Fail: %s", res.Error)
+		}
+
 	default:
 		color.Yellow("Unknown command: %s", action)
 	}
