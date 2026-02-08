@@ -463,6 +463,20 @@ func openInBrowser(url string) error {
 	return cmd.Start()
 }
 
+// validateEnvironment garante que apenas nomes de arquivos permitidos sejam usados 🌸🛡️
+func validateEnvironment(env string) error {
+	allowed := map[string]bool{
+		".env":             true,
+		".env.production":  true,
+		".env.development": true,
+		".env.preview":     true,
+	}
+	if !allowed[env] {
+		return fmt.Errorf("invalid environment name: '%s'. Allowed: .env, .env.production, .env.development, .env.preview", env)
+	}
+	return nil
+}
+
 func main() {
 	color.New(color.FgCyan, color.Bold).Println("🌸 envware-go ENGINE v2.1.0")
 	if len(os.Args) < 2 {
@@ -497,6 +511,11 @@ func main() {
 		environment := ".env"
 		if len(os.Args) >= 5 {
 			environment = os.Args[4]
+		}
+
+		if err := validateEnvironment(environment); err != nil {
+			color.Red("❌ %v", err)
+			return
 		}
 
 		fmt.Print("🔐 Auth... ")
@@ -613,6 +632,12 @@ func main() {
 		if len(os.Args) >= 5 {
 			environment = os.Args[4]
 		}
+
+		if err := validateEnvironment(environment); err != nil {
+			color.Red("❌ %v", err)
+			return
+		}
+
 		outputFile := environment + ".crypto"
 		if len(os.Args) >= 6 {
 			outputFile = os.Args[5]
@@ -816,6 +841,11 @@ func main() {
 			environment = os.Args[4]
 		}
 
+		if err := validateEnvironment(environment); err != nil {
+			color.Red("❌ %v", err)
+			return
+		}
+
 		fmt.Print("🔐 Auth... ")
 		signature, err := service.getAuthChallenge(pubStr, privKey)
 		if err != nil {
@@ -991,11 +1021,13 @@ func main() {
 			} else {
 				for _, env := range finalResp.Envs {
 					tag := color.New(color.FgHiMagenta).Sprint("[DEV] 🌸")
-					nameLower := strings.ToLower(env.Name)
-					if strings.Contains(nameLower, "prod") || strings.Contains(nameLower, "production") {
+					name := env.Name
+					if name == ".env" || name == ".env.production" {
 						tag = color.New(color.FgRed, color.Bold).Sprint("[PROD] 🛡️")
+					} else if name == ".env.preview" {
+						tag = color.New(color.FgCyan, color.Bold).Sprint("[PREV] ✨")
 					}
-					fmt.Printf("  - %s %-15s | %d secrets\n", tag, env.Name, env.Count)
+					fmt.Printf("  - %s %-16s | %d secrets\n", tag, env.Name, env.Count)
 				}
 			}
 			fmt.Println()
@@ -1051,6 +1083,11 @@ func main() {
 		environment := ".env"
 		if len(os.Args) >= 5 {
 			environment = os.Args[4]
+		}
+
+		if err := validateEnvironment(environment); err != nil {
+			color.Red("❌ %v", err)
+			return
 		}
 
 		fmt.Print("🔐 Auth... ")
@@ -1412,8 +1449,12 @@ func showUsage() {
 	fmt.Println("\nCore Commands:")
 	fmt.Println("  push <team> <project> [env]    Encrypt and upload secrets")
 	fmt.Println("  pull <team> <project> [env]    Download and decrypt secrets")
-	fmt.Println("  request <team> <project> <role> Request access or create project")
+	fmt.Println("  request <t> <p> <role>         Request access (ADMIN, PREVIEW, DEV)")
 	fmt.Println("  accept [id]                    List or approve access requests")
+	fmt.Println("\nEnvironments (Allowed Names):")
+	fmt.Println("  .env, .env.production          Production (OWNER/ADMIN only)")
+	fmt.Println("  .env.preview                   Preview (OWNER/ADMIN/PREVIEW)")
+	fmt.Println("  .env.development               Development (All roles)")
 	fmt.Println("\nLocal Mode Commands (Premium 🛡️):")
 	fmt.Println("  encrypt <team> <project> [env] Encrypt .env to local .env.crypto")
 	fmt.Println("  decrypt <team> <project> [file] Decrypt .env.crypto to .env.decrypted")
