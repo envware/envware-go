@@ -648,12 +648,47 @@ func main() {
 		}
 		color.Green("OK!")
 
-		projectKeyBytes, err := service.RSADecrypt(pullResp.EncryptedProjectKey, privKey)
-		if err != nil {
-			color.Red("Error decrypting project key: %v", err)
-			return
+		var projectKey string
+		if pullResp.EncryptedProjectKey != "" {
+			projectKeyBytes, err := service.RSADecrypt(pullResp.EncryptedProjectKey, privKey)
+			if err != nil {
+				color.Red("Error decrypting project key: %v. 🌸", err)
+				return
+			}
+			projectKey = string(projectKeyBytes)
+		} else {
+			color.Yellow("Project E2EE not initialized. Initializing... 🛡️")
+			signature2, err := service.getAuthChallenge(pubStr, privKey)
+			if err != nil {
+				color.Red("Fail: %v", err)
+				return
+			}
+
+			keyInitReq, _ := json.Marshal(ApproveRequest{
+				PublicKey: pubStr, Signature: signature2, TeamSlug: team, ProjectSlug: project,
+			})
+			respInit, err := http.Post(service.BaseURL+"/projects/keys", "application/json", bytes.NewBuffer(keyInitReq))
+			if err != nil {
+				color.Red("Server Offline")
+				return
+			}
+			var keyResp CommonResponse
+			json.NewDecoder(respInit.Body).Decode(&keyResp)
+			respInit.Body.Close()
+
+			if keyResp.Success && keyResp.EncryptedProjectKey != "" {
+				projectKeyBytes, err := service.RSADecrypt(keyResp.EncryptedProjectKey, privKey)
+				if err != nil {
+					color.Red("Failed to decrypt newly initialized key: %v", err)
+					return
+				}
+				projectKey = string(projectKeyBytes)
+				color.Green("✔ E2EE initialized! 🛡️")
+			} else {
+				color.Red("Failed to initialize project: %s.", keyResp.Error)
+				return
+			}
 		}
-		projectKey := string(projectKeyBytes)
 
 		secretsMap, err := parseEnvFile(environment)
 		if err != nil {
