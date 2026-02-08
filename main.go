@@ -64,6 +64,8 @@ envw pull <team> <project> [env-file]
 | envw secrets <team> <project> [env] | List secret keys (names only) |
 | envw accept | List pending access requests |
 | envw accept <id> | Approve access request |
+| envw encrypt <team> <project> | Local E2EE encryption |
+| envw decrypt <team> <project> | Local E2EE decryption |
 | envw purchase teams | Buy extra team slot |
 | envw purchase projects <team> | Buy +5 project slots |
 | envw purchase users <team> <project> | Buy +10 user slots |
@@ -310,11 +312,12 @@ type TeamProjectInfo struct {
 }
 
 type ProjectInfo struct {
-	Name      string     `json:"name"`
-	Slug      string     `json:"slug"`
-	UsersUsed int        `json:"usersUsed"`
-	MaxUsers  int        `json:"maxUsers"`
-	Users     []UserInfo `json:"users"`
+	Name         string     `json:"name"`
+	Slug         string     `json:"slug"`
+	UsersUsed    int        `json:"usersUsed"`
+	MaxUsers     int        `json:"maxUsers"`
+	HasLocalMode bool       `json:"hasLocalMode"`
+	Users        []UserInfo `json:"users"`
 }
 
 type UserInfo struct {
@@ -595,6 +598,162 @@ func main() {
 		} else {
 			color.Red("❌ Push failed: %s", finalResp.Error)
 		}
+
+	case "encrypt":
+		if len(os.Args) < 4 {
+			fmt.Println("Usage: encrypt <team> <project> [env-file] [output-file]")
+			return
+		}
+		team, project := os.Args[2], os.Args[3]
+		environment := ".env"
+		if len(os.Args) >= 5 {
+			environment = os.Args[4]
+		}
+		outputFile := environment + ".crypto"
+		if len(os.Args) >= 6 {
+			outputFile = os.Args[5]
+		}
+
+		fmt.Print("🔐 Auth & License Check... ")
+		signature, err := service.getAuthChallenge(pubStr, privKey)
+		if err != nil {
+			color.Red("Fail: %v", err)
+			return
+		}
+
+		pullReq, _ := json.Marshal(PullRequest{PublicKey: pubStr, Signature: signature, TeamSlug: team, ProjectSlug: project, Environment: environment})
+		resp, err := http.Post(service.BaseURL+"/pull-secrets", "application/json", bytes.NewBuffer(pullReq))
+		if err != nil {
+			color.Red("Server Offline")
+			return
+		}
+		var pullResp CommonResponse
+		json.NewDecoder(resp.Body).Decode(&pullResp)
+		resp.Body.Close()
+
+		if !pullResp.Success {
+			color.Red("Error: %s 🌸", pullResp.Error)
+			return
+		}
+
+		if pullResp.Project == nil || !pullResp.Project.HasLocalMode {
+			color.Red("FAIL!")
+			color.Yellow("\nLocal Mode is not enabled for this project. 🛡️")
+			color.Cyan("Purchase it with: envw purchase local %s %s\n", team, project)
+			return
+		}
+		color.Green("OK!")
+
+		projectKeyBytes, err := service.RSADecrypt(pullResp.EncryptedProjectKey, privKey)
+		if err != nil {
+			color.Red("Error decrypting project key: %v", err)
+			return
+		}
+		projectKey := string(projectKeyBytes)
+
+		secretsMap, err := parseEnvFile(environment)
+		if err != nil {
+			color.Red("Error reading %s: %v", environment, err)
+			return
+		}
+
+		var secrets []Secret
+		for k, v := range secretsMap {
+			s, _ := service.EncryptSecret(v, projectKey)
+			s.Key = k
+			secrets = append(secrets, s)
+		}
+
+		// Save as JSON encrypted file
+		payload := map[string]interface{}{
+			"version":     "2.0",
+			"team":        team,
+			"project":     project,
+			"environment": environment,
+			"secrets":     secrets,
+		}
+		data, _ := json.MarshalIndent(payload, "", "  ")
+		os.WriteFile(outputFile, data, 0644)
+		color.Green("✔ Locally encrypted file saved to: %s 🛡️🌸", outputFile)
+
+	case "decrypt":
+		if len(os.Args) < 4 {
+			fmt.Println("Usage: decrypt <team> <project> [crypto-file] [output-file]")
+			return
+		}
+		team, project := os.Args[2], os.Args[3]
+		cryptoFile := ".env.crypto"
+		if len(os.Args) >= 5 {
+			cryptoFile = os.Args[4]
+		}
+		outputFile := ".env.decrypted"
+		if len(os.Args) >= 6 {
+			outputFile = os.Args[5]
+		}
+
+		fmt.Print("🔐 Auth & License Check... ")
+		signature, err := service.getAuthChallenge(pubStr, privKey)
+		if err != nil {
+			color.Red("Fail: %v", err)
+			return
+		}
+
+		pullReq, _ := json.Marshal(PullRequest{PublicKey: pubStr, Signature: signature, TeamSlug: team, ProjectSlug: project, Environment: ".env"})
+		resp, err := http.Post(service.BaseURL+"/pull-secrets", "application/json", bytes.NewBuffer(pullReq))
+		if err != nil {
+			color.Red("Server Offline")
+			return
+		}
+		var pullResp CommonResponse
+		json.NewDecoder(resp.Body).Decode(&pullResp)
+		resp.Body.Close()
+
+		if !pullResp.Success {
+			color.Red("Error: %s 🌸", pullResp.Error)
+			return
+		}
+
+		if pullResp.Project == nil || !pullResp.Project.HasLocalMode {
+			color.Red("FAIL!")
+			color.Yellow("\nLocal Mode is not enabled for this project. 🛡️")
+			return
+		}
+		color.Green("OK!")
+
+		projectKeyBytes, err := service.RSADecrypt(pullResp.EncryptedProjectKey, privKey)
+		if err != nil {
+			color.Red("Error decrypting project key: %v", err)
+			return
+		}
+		projectKey := string(projectKeyBytes)
+
+		cryptoData, err := os.ReadFile(cryptoFile)
+		if err != nil {
+			color.Red("Error reading %s: %v", cryptoFile, err)
+			return
+		}
+
+		var payload struct {
+			Secrets []Secret `json:"secrets"`
+		}
+		if err := json.Unmarshal(cryptoData, &payload); err != nil {
+			color.Red("Invalid crypto file format: %v", err)
+			return
+		}
+
+		var envContent string
+		for _, s := range payload.Secrets {
+			val, err := service.DecryptSecret(s, projectKey)
+			if err != nil {
+				color.Red("Error decrypting secret %s: %v", s.Key, err)
+				continue
+			}
+			envContent += fmt.Sprintf("%s=%s\n", s.Key, val)
+		}
+
+		os.WriteFile(outputFile, []byte(envContent), 0644)
+		color.Green("✔ Secrets decrypted to: %s 💎🌸", outputFile)
+		checkGitIgnore(outputFile)
 
 	case "pull":
 		if len(os.Args) < 4 {
@@ -1200,6 +1359,9 @@ func showUsage() {
 	fmt.Println("  pull <team> <project> [env]    Download and decrypt secrets")
 	fmt.Println("  request <team> <project> <role> Request access or create project")
 	fmt.Println("  accept [id]                    List or approve access requests")
+	fmt.Println("\nLocal Mode Commands (Premium 🛡️):")
+	fmt.Println("  encrypt <team> <project> [env] Encrypt .env to local .env.crypto")
+	fmt.Println("  decrypt <team> <project> [file] Decrypt .env.crypto to .env.decrypted")
 	fmt.Println("\nInfo Commands:")
 	fmt.Println("  status [team] [project]        Show info about user, team or project")
 	fmt.Println("  projects <team>                List projects in a team")
@@ -1211,6 +1373,7 @@ func showUsage() {
 	fmt.Println("  purchase teams                 Buy extra team slot ($10/mo)")
 	fmt.Println("  purchase projects <team>       Buy +5 project slots ($10/mo)")
 	fmt.Println("  purchase users <t> <p>         Buy +10 user slots ($10/mo)")
+	fmt.Println("  purchase local <t> <p>         Unlock Local Mode for project ($10)")
 	fmt.Println("\nOther:")
 	fmt.Println("  set-email <email>              Set your account email")
 	fmt.Println("  docs [--llm]                   Show documentation")
