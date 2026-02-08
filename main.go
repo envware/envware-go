@@ -367,12 +367,16 @@ func (s *EnvwareService) GetFingerprint(publicKey string) string {
 }
 
 // deriveKey usa scrypt para derivar a chave AES igual ao Node.js
-func (s *EnvwareService) deriveKey(projectKey string) ([]byte, error) {
-	return scrypt.Key([]byte(projectKey), []byte("envware-salt"), 16384, 8, 1, 32)
+func (s *EnvwareService) deriveKey(projectKey string, environment string) ([]byte, error) {
+	salt := "envware-salt"
+	if environment != "" && environment != ".env" {
+		salt = "envware-salt-" + environment
+	}
+	return scrypt.Key([]byte(projectKey), []byte(salt), 16384, 8, 1, 32)
 }
 
-func (s *EnvwareService) EncryptSecret(text string, projectKey string) (Secret, error) {
-	key, err := s.deriveKey(projectKey)
+func (s *EnvwareService) EncryptSecret(text string, projectKey string, environment string) (Secret, error) {
+	key, err := s.deriveKey(projectKey, environment)
 	if err != nil {
 		return Secret{}, err
 	}
@@ -390,8 +394,8 @@ func (s *EnvwareService) EncryptSecret(text string, projectKey string) (Secret, 
 	}, nil
 }
 
-func (s *EnvwareService) DecryptSecret(enc Secret, projectKey string) (string, error) {
-	key, err := s.deriveKey(projectKey)
+func (s *EnvwareService) DecryptSecret(enc Secret, projectKey string, environment string) (string, error) {
+	key, err := s.deriveKey(projectKey, environment)
 	if err != nil {
 		return "", err
 	}
@@ -566,7 +570,7 @@ func main() {
 		secretsMap, _ := parseEnvFile(environment)
 		var secrets []Secret
 		for k, v := range secretsMap {
-			s, _ := service.EncryptSecret(v, projectKey)
+			s, _ := service.EncryptSecret(v, projectKey, environment)
 			s.Key = k
 			secrets = append(secrets, s)
 		}
@@ -659,7 +663,7 @@ func main() {
 
 		var secrets []Secret
 		for k, v := range secretsMap {
-			s, _ := service.EncryptSecret(v, projectKey)
+			s, _ := service.EncryptSecret(v, projectKey, environment)
 			s.Key = k
 			secrets = append(secrets, s)
 		}
@@ -691,14 +695,39 @@ func main() {
 			outputFile = os.Args[5]
 		}
 
-		fmt.Print("🔐 Auth & License Check... ")
+		// Read crypto file first to get environment metadata 🌸
+		cryptoData, err := os.ReadFile(cryptoFile)
+		if err != nil {
+			color.Red("Error reading %s: %v", cryptoFile, err)
+			return
+		}
+
+		var payload struct {
+			Environment string   `json:"environment"`
+			Secrets     []Secret `json:"secrets"`
+		}
+		if err := json.Unmarshal(cryptoData, &payload); err != nil {
+			color.Red("Invalid crypto file format: %v", err)
+			return
+		}
+
+		targetEnv := payload.Environment
+		if targetEnv == "" {
+			targetEnv = ".env"
+		}
+
+		fmt.Print("🔐 Auth & Permission Check... ")
 		signature, err := service.getAuthChallenge(pubStr, privKey)
 		if err != nil {
 			color.Red("Fail: %v", err)
 			return
 		}
 
-		pullReq, _ := json.Marshal(PullRequest{PublicKey: pubStr, Signature: signature, TeamSlug: team, ProjectSlug: project, Environment: ".env"})
+		pullReq, _ := json.Marshal(PullRequest{
+			PublicKey: pubStr, Signature: signature, 
+			TeamSlug: team, ProjectSlug: project, 
+			Environment: targetEnv,
+		})
 		resp, err := http.Post(service.BaseURL+"/pull-secrets", "application/json", bytes.NewBuffer(pullReq))
 		if err != nil {
 			color.Red("Server Offline")
@@ -709,12 +738,12 @@ func main() {
 		resp.Body.Close()
 
 		if !pullResp.Success {
+			color.Red("FAIL!")
 			color.Red("Error: %s 🌸", pullResp.Error)
 			return
 		}
 
 		if pullResp.Project == nil || !pullResp.Project.HasLocalMode {
-			color.Red("FAIL!")
 			color.Yellow("\nLocal Mode is not enabled for this project. 🛡️")
 			return
 		}
@@ -727,23 +756,9 @@ func main() {
 		}
 		projectKey := string(projectKeyBytes)
 
-		cryptoData, err := os.ReadFile(cryptoFile)
-		if err != nil {
-			color.Red("Error reading %s: %v", cryptoFile, err)
-			return
-		}
-
-		var payload struct {
-			Secrets []Secret `json:"secrets"`
-		}
-		if err := json.Unmarshal(cryptoData, &payload); err != nil {
-			color.Red("Invalid crypto file format: %v", err)
-			return
-		}
-
 		var envContent string
 		for _, s := range payload.Secrets {
-			val, err := service.DecryptSecret(s, projectKey)
+			val, err := service.DecryptSecret(s, projectKey, targetEnv)
 			if err != nil {
 				color.Red("Error decrypting secret %s: %v", s.Key, err)
 				continue
@@ -752,7 +767,7 @@ func main() {
 		}
 
 		os.WriteFile(outputFile, []byte(envContent), 0644)
-		color.Green("✔ Secrets decrypted to: %s 💎🌸", outputFile)
+		color.Green("✔ Secrets from %s decrypted to: %s 💎🌸", targetEnv, outputFile)
 		checkGitIgnore(outputFile)
 
 	case "pull":
@@ -798,7 +813,7 @@ func main() {
 
 		var envContent string
 		for _, s := range pullResp.Secrets {
-			val, err := service.DecryptSecret(s, projectKey)
+			val, err := service.DecryptSecret(s, projectKey, environment)
 			if err != nil {
 				color.Red("Error decrypting secret %s: %v", s.Key, err)
 				continue
