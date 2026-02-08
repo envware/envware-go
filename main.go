@@ -457,7 +457,7 @@ func openInBrowser(url string) error {
 }
 
 func main() {
-	color.New(color.FgCyan, color.Bold).Println("🌸 envware-go ENGINE v2.0.6")
+	color.New(color.FgCyan, color.Bold).Println("🌸 envware-go ENGINE v2.0.7")
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: envw <command> [args...]")
 		return
@@ -649,6 +649,9 @@ func main() {
 
 		os.WriteFile(environment, []byte(envContent), 0644)
 		color.Green("✔ %s updated! 💎", environment)
+
+		// Check if the pulled file is in .gitignore
+		checkGitIgnore(environment)
 
 	case "status":
 		teamSlug := ""
@@ -1171,8 +1174,96 @@ func main() {
 			color.Red("Fail: %s", res.Error)
 		}
 
+	case "fingerprint":
+		fingerprint := service.GetFingerprint(pubStr)
+		fmt.Printf("\n💻 Your Fingerprint: SHA256:%s\n", fingerprint)
+		fmt.Println("Share this with your team OWNER/ADMIN to verify your identity. 🛡️ 🌸")
+
+	case "version":
+		fmt.Printf("envware-go version 2.0.7 🌸\n")
+
+	case "help":
+		showUsage()
+
 	default:
-		color.Yellow("Unknown command: %s", action)
+		if action != "" && action != "-h" && action != "--help" {
+			color.Yellow("Unknown command: %s", action)
+		}
+		showUsage()
+	}
+}
+
+func showUsage() {
+	fmt.Println("\nUsage: envw <command> [args...]")
+	fmt.Println("\nCore Commands:")
+	fmt.Println("  push <team> <project> [env]    Encrypt and upload secrets")
+	fmt.Println("  pull <team> <project> [env]    Download and decrypt secrets")
+	fmt.Println("  request <team> <project> <role> Request access or create project")
+	fmt.Println("  accept [id]                    List or approve access requests")
+	fmt.Println("\nInfo Commands:")
+	fmt.Println("  status [team] [project]        Show info about user, team or project")
+	fmt.Println("  projects <team>                List projects in a team")
+	fmt.Println("  envs <team> <project>          List environments in a project")
+	fmt.Println("  secrets <team> <project> [env] List secret keys (names only)")
+	fmt.Println("  fingerprint                    Show your machine's fingerprint")
+	fmt.Println("  version                        Show current version")
+	fmt.Println("\nBilling Commands:")
+	fmt.Println("  purchase teams                 Buy extra team slot ($10/mo)")
+	fmt.Println("  purchase projects <team>       Buy +5 project slots ($10/mo)")
+	fmt.Println("  purchase users <t> <p>         Buy +10 user slots ($10/mo)")
+	fmt.Println("\nOther:")
+	fmt.Println("  set-email <email>              Set your account email")
+	fmt.Println("  docs [--llm]                   Show documentation")
+	fmt.Println()
+}
+
+func checkGitIgnore(envFile string) {
+	// 1. Check if .gitignore exists
+	if _, err := os.Stat(".gitignore"); os.IsNotExist(err) {
+		return
+	}
+
+	// 2. Use 'git check-ignore' to see if the file is ignored
+	cmd := exec.Command("git", "check-ignore", "-q", envFile)
+	err := cmd.Run()
+
+	// If exit code is 0, the file is ignored.
+	// If exit code is 1, the file is NOT ignored.
+	if err == nil {
+		return // Already ignored
+	}
+
+	// 3. If not ignored, ask the user
+	color.Yellow("\n⚠️  Warning: %s is not in your .gitignore!", envFile)
+	fmt.Print("Do you want to add it to .gitignore? (y/N): ")
+
+	var response string
+	fmt.Scanln(&response)
+	response = strings.ToLower(strings.TrimSpace(response))
+
+	if response == "y" || response == "yes" {
+		f, err := os.OpenFile(".gitignore", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			color.Red("Error opening .gitignore: %v", err)
+			return
+		}
+		defer f.Close()
+
+		// Add a newline before if needed
+		info, _ := f.Stat()
+		if info.Size() > 0 {
+			// Check if file ends with newline
+			content, _ := os.ReadFile(".gitignore")
+			if len(content) > 0 && content[len(content)-1] != '\n' {
+				f.WriteString("\n")
+			}
+		}
+
+		if _, err := f.WriteString(envFile + "\n"); err != nil {
+			color.Red("Error writing to .gitignore: %v", err)
+		} else {
+			color.Green("✔ Added %s to .gitignore! 🌸", envFile)
+		}
 	}
 }
 
