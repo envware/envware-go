@@ -90,6 +90,23 @@ When you approve a new member (`envw accept`):
 
 **Result:** Every team member has their own "copy" of the Master Code, but each copy is locked with their unique SSH identity. If the server is compromised, the attacker only finds millions of sealed envelopes they cannot open. 🛡️🌸
 
+## Advanced Security Features
+
+### 🛡️ Local Mode (E2EE for Git)
+With **Local Mode**, you can store your secrets directly in your Git repository without exposing them.
+- **`encrypt <team> <project> [env-file]`**: Creates a secure `.env.crypto` file.
+- **`decrypt <team> <project> [file]`**: Decrypts it back to your environment.
+
+### 🧂 Environment Salting
+Envware adds an extra layer of security by using the environment name (e.g., `production`, `development`) as a **cryptographic salt**. 
+- Even if a developer has the Project Key for `development`, they **cannot** decrypt a `production` file.
+- The backend enforces role-based access, blocking non-admins from até mesmo requesting the decryption context for production environments.
+
+### 🛡️ AES-256-GCM Implementation
+We use Authenticated Encryption (GCM) to ensure both **privacy** and **integrity**:
+- **`iv` (Initialization Vector)**: A unique, random "nonce" for every encryption operation. This ensures that the same secret encrypted twice results in different ciphertexts, preventing pattern analysis.
+- **`tag` (Authentication Tag)**: A cryptographic checksum that proves the data hasn't been tampered with. If even a single bit is modified in your `.env.crypto`, the decryption will fail.
+
 ---
 
 **Website:** [https://www.envware.dev](https://www.envware.dev)  
