@@ -275,6 +275,7 @@ type CommonResponse struct {
 	Envs                []EnvInfo         `json:"envs,omitempty"`
 	Projects            []ProjectListItem `json:"projects,omitempty"`
 	EncryptedProjectKey string            `json:"encryptedProjectKey,omitempty"`
+	Role                string            `json:"role,omitempty"`
 	Team                *TeamInfo         `json:"team,omitempty"`
 	Project             *ProjectInfo      `json:"project,omitempty"`
 	User                *UserStats        `json:"user,omitempty"`
@@ -541,6 +542,12 @@ func main() {
 			return
 		}
 
+		// Role Check for Push 🛡️
+		if pullResp.Role != "OWNER" && pullResp.Role != "ADMIN" {
+			color.Red("❌ Access Denied: You must be an OWNER or ADMIN to push secrets. 🛡️")
+			return
+		}
+
 		var projectKey string
 		if pullResp.EncryptedProjectKey != "" {
 			projectKeyBytes, err := service.RSADecrypt(pullResp.EncryptedProjectKey, privKey)
@@ -662,6 +669,12 @@ func main() {
 
 		if !pullResp.Success {
 			color.Red("Error: %s 🌸", pullResp.Error)
+			return
+		}
+
+		// Role Check for Encrypt 🛡️
+		if pullResp.Role != "OWNER" && pullResp.Role != "ADMIN" {
+			color.Red("❌ Access Denied: You must be an OWNER or ADMIN to use Local Mode (encrypt). 🛡️")
 			return
 		}
 
