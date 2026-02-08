@@ -990,7 +990,12 @@ func main() {
 				color.Yellow("  No environments found.")
 			} else {
 				for _, env := range finalResp.Envs {
-					fmt.Printf("  - %s | %d secrets\n", env.Name, env.Count)
+					tag := color.New(color.FgHiMagenta).Sprint("[DEV] 🌸")
+					nameLower := strings.ToLower(env.Name)
+					if strings.Contains(nameLower, "prod") || strings.Contains(nameLower, "production") {
+						tag = color.New(color.FgRed, color.Bold).Sprint("[PROD] 🛡️")
+					}
+					fmt.Printf("  - %s %-15s | %d secrets\n", tag, env.Name, env.Count)
 				}
 			}
 			fmt.Println()

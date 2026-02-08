@@ -97,10 +97,13 @@ With **Local Mode**, you can store your secrets directly in your Git repository 
 - **`encrypt <team> <project> [env-file]`**: Creates a secure `.env.crypto` file.
 - **`decrypt <team> <project> [file]`**: Decrypts it back to your environment.
 
-### 🧂 Environment Salting
+### 🧂 Environment Salting & RBAC
 Envware adds an extra layer of security by using the environment name (e.g., `production`, `development`) as a **cryptographic salt**. 
-- Even if a developer has the Project Key for `development`, they **cannot** decrypt a `production` file.
-- The backend enforces role-based access, blocking non-admins from até mesmo requesting the decryption context for production environments.
+- **How it works:** When you run `encrypt`, the environment name is embedded in the metadata.
+- **Protection:** If a file contains "prod" or "production" in its environment name, the backend will strictly deny decryption keys to users with the `DEVELOPER` role.
+- **Deterministic:** Even if a developer has the Master Project Key, the mathematical salt (based on the environment name) ensures they cannot derive the final decryption key for production files.
+
+> **Note:** Always name your production-sensitive files using "prod" or "production" (e.g., `.env.production`) to trigger the automatic RBAC protection. 🛡️🌸
 
 ### 🛡️ AES-256-GCM Implementation
 We use Authenticated Encryption (GCM) to ensure both **privacy** and **integrity**:
