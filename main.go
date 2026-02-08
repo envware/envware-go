@@ -457,7 +457,7 @@ func openInBrowser(url string) error {
 }
 
 func main() {
-	color.New(color.FgCyan, color.Bold).Println("🌸 envware-go ENGINE v2.0.7")
+	color.New(color.FgCyan, color.Bold).Println("🌸 envware-go ENGINE v2.0.8")
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: envw <command> [args...]")
 		return
@@ -1180,7 +1180,7 @@ func main() {
 		fmt.Println("Share this with your team OWNER/ADMIN to verify your identity. 🛡️ 🌸")
 
 	case "version":
-		fmt.Printf("envware-go version 2.0.7 🌸\n")
+		fmt.Printf("envware-go version 2.0.8 🌸\n")
 
 	case "help":
 		showUsage()
