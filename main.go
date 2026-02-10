@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/fatih/color"
@@ -211,10 +212,12 @@ type StatusRequest struct {
 }
 
 type Secret struct {
-	Key   string `json:"key"`
-	Value string `json:"value"`
-	Iv    string `json:"iv"`
-	Tag   string `json:"tag"`
+	K   string `json:"k"`   // Encrypted Key 🌸
+	V   string `json:"v"`   // Encrypted Value
+	IvK string `json:"ik"`  // IV for Key
+	IvV string `json:"iv"`  // IV for Value
+	Tag string `json:"tag"` // Auth Tag (Value)
+	TagK string `json:"tk"`  // Auth Tag (Key)
 }
 
 type PushRequest struct {
@@ -304,6 +307,7 @@ type TeamInfo struct {
 	MaxUsersPerProject int               `json:"maxUsersPerProject"`
 	OwnerEmail         string            `json:"ownerEmail"`
 	Projects           []TeamProjectInfo `json:"projects"`
+	Members            []UserInfo        `json:"members"`
 }
 
 type TeamProjectInfo struct {
@@ -367,6 +371,22 @@ func (s *EnvwareService) GetFingerprint(publicKey string) string {
 	return base64.StdEncoding.EncodeToString(hash[:])
 }
 
+func (s *EnvwareService) LoadMetadata(path string) (team, project, env string, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", "", "", err
+	}
+	var payload struct {
+		Team        string `json:"team"`
+		Project     string `json:"project"`
+		Environment string `json:"environment"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return "", "", "", err
+	}
+	return payload.Team, payload.Project, payload.Environment, nil
+}
+
 // deriveKey usa scrypt para derivar a chave AES igual ao Node.js
 func (s *EnvwareService) deriveKey(projectKey string, environment string) ([]byte, error) {
 	salt := "envware-salt"
@@ -384,30 +404,73 @@ func (s *EnvwareService) EncryptSecret(text string, projectKey string, environme
 
 	block, _ := aes.NewCipher(key)
 	gcm, _ := cipher.NewGCM(block)
-	iv := make([]byte, gcm.NonceSize())
-	io.ReadFull(rand.Reader, iv)
-	sealed := gcm.Seal(nil, iv, []byte(text), nil)
+	
+	// Encrypt Value
+	ivV := make([]byte, gcm.NonceSize())
+	io.ReadFull(rand.Reader, ivV)
+	sealedV := gcm.Seal(nil, ivV, []byte(text), nil)
 	tagSize := gcm.Overhead()
+
 	return Secret{
-		Value: hex.EncodeToString(sealed[:len(sealed)-tagSize]),
-		Iv:    hex.EncodeToString(iv),
-		Tag:   hex.EncodeToString(sealed[len(sealed)-tagSize:]),
+		V:    hex.EncodeToString(sealedV[:len(sealedV)-tagSize]),
+		IvV:  hex.EncodeToString(ivV),
+		Tag:  hex.EncodeToString(sealedV[len(sealedV)-tagSize:]),
 	}, nil
 }
 
-func (s *EnvwareService) DecryptSecret(enc Secret, projectKey string, environment string) (string, error) {
+func (s *EnvwareService) EncryptFullPair(keyText, valText, projectKey, environment string) (Secret, error) {
 	key, err := s.deriveKey(projectKey, environment)
 	if err != nil {
-		return "", err
+		return Secret{}, err
 	}
 
 	block, _ := aes.NewCipher(key)
 	gcm, _ := cipher.NewGCM(block)
-	iv, _ := hex.DecodeString(enc.Iv)
-	val, _ := hex.DecodeString(enc.Value)
-	tag, _ := hex.DecodeString(enc.Tag)
-	plaintext, err := gcm.Open(nil, iv, append(val, tag...), nil)
-	return string(plaintext), err
+	tagSize := gcm.Overhead()
+
+	// Encrypt Key 🌸
+	ivK := make([]byte, gcm.NonceSize())
+	io.ReadFull(rand.Reader, ivK)
+	sealedK := gcm.Seal(nil, ivK, []byte(keyText), nil)
+
+	// Encrypt Value
+	ivV := make([]byte, gcm.NonceSize())
+	io.ReadFull(rand.Reader, ivV)
+	sealedV := gcm.Seal(nil, ivV, []byte(valText), nil)
+
+	return Secret{
+		K:    hex.EncodeToString(sealedK[:len(sealedK)-tagSize]),
+		TagK: hex.EncodeToString(sealedK[len(sealedK)-tagSize:]),
+		IvK:  hex.EncodeToString(ivK),
+		V:    hex.EncodeToString(sealedV[:len(sealedV)-tagSize]),
+		Tag:  hex.EncodeToString(sealedV[len(sealedV)-tagSize:]),
+		IvV:  hex.EncodeToString(ivV),
+	}, nil
+}
+
+func (s *EnvwareService) DecryptFullPair(enc Secret, projectKey string, environment string) (string, string, error) {
+	key, err := s.deriveKey(projectKey, environment)
+	if err != nil {
+		return "", "", err
+	}
+
+	block, _ := aes.NewCipher(key)
+	gcm, _ := cipher.NewGCM(block)
+
+	// Decrypt Key
+	ivK, _ := hex.DecodeString(enc.IvK)
+	valK, _ := hex.DecodeString(enc.K)
+	tagK, _ := hex.DecodeString(enc.TagK)
+	plaintextK, errK := gcm.Open(nil, ivK, append(valK, tagK...), nil)
+
+	// Decrypt Value
+	ivV, _ := hex.DecodeString(enc.IvV)
+	valV, _ := hex.DecodeString(enc.V)
+	tagV, _ := hex.DecodeString(enc.Tag)
+	plaintextV, errV := gcm.Open(nil, ivV, append(valV, tagV...), nil)
+
+	if errK != nil { return "", "", errK }
+	return string(plaintextK), string(plaintextV), errV
 }
 
 func (s *EnvwareService) RSADecrypt(encStr string, privKey *rsa.PrivateKey) ([]byte, error) {
@@ -478,10 +541,57 @@ func validateEnvironment(env string) error {
 	return nil
 }
 
+func (s *EnvwareService) GetGitRemoteURL() string {
+	cmd := exec.Command("git", "remote", "get-url", "origin")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func (s *EnvwareService) ResolveContext(team, project string) (string, string, error) {
+	if team != "" && project != "" {
+		return team, project, nil
+	}
+
+	// Try git remote
+	gitUrl := s.GetGitRemoteURL()
+	if gitUrl != "" {
+		resp, err := http.Get(s.BaseURL + "/projects/resolve?gitUrl=" + gitUrl)
+		if err == nil {
+			defer resp.Body.Close()
+			var res struct {
+				Success     bool   `json:"success"`
+				TeamSlug    string `json:"teamSlug"`
+				ProjectSlug string `json:"projectSlug"`
+			}
+			json.NewDecoder(resp.Body).Decode(&res)
+			if res.Success {
+				return res.TeamSlug, res.ProjectSlug, nil
+			}
+		}
+	}
+
+	// Try local metadata if in git mode
+	cryptoFiles, _ := filepath.Glob("*.env*.crypto")
+	if len(cryptoFiles) > 0 {
+		t, p, _, err := s.LoadMetadata(cryptoFiles[0])
+		if err == nil {
+			return t, p, nil
+		}
+	}
+
+	return "", "", fmt.Errorf("could not resolve team/project context. Please specify them or run 'git envware checkout'")
+}
+
 func main() {
-	color.New(color.FgCyan, color.Bold).Println("🌸 envware-go ENGINE v2.1.0")
+	binaryName := filepath.Base(os.Args[0])
+	isGitMode := strings.HasPrefix(binaryName, "git-") && os.Getenv("ENVW_INTERNAL") != "true"
+
+	color.New(color.FgCyan, color.Bold).Println("🌸 envware-go ENGINE v2.2.0")
 	if len(os.Args) < 2 {
-		showUsage()
+		showUsage(isGitMode)
 		return
 	}
 
@@ -503,15 +613,182 @@ func main() {
 	}
 
 	switch action {
-	case "push":
-		if len(os.Args) < 4 {
-			fmt.Println("Usage: push <team> <project> [env-file]")
+	case "checkout":
+		if len(os.Args) < 3 {
+			color.Red("Usage: git envware checkout <git-url>")
 			return
 		}
-		team, project := os.Args[2], os.Args[3]
+		gitUrl := os.Args[2]
+
+		color.Cyan("🚀 git clone %s...", gitUrl)
+		cmdClone := exec.Command("git", "clone", gitUrl)
+		cmdClone.Stdout = os.Stdout
+		cmdClone.Stderr = os.Stderr
+		if err := cmdClone.Run(); err != nil {
+			color.Red("❌ git clone failed: %v", err)
+			return
+		}
+
+		// Extract folder name from URL
+		parts := strings.Split(gitUrl, "/")
+		folderName := strings.TrimSuffix(parts[len(parts)-1], ".git")
+
+		// Enter directory
+		os.Chdir(folderName)
+
+		color.Cyan("🌸 Linking with Envware...")
+		resp, err := http.Get(service.BaseURL + "/projects/resolve?gitUrl=" + gitUrl)
+		if err != nil {
+			color.Yellow("⚠️  Could not reach server to link project, but repository is cloned.")
+			return
+		}
+		defer resp.Body.Close()
+
+		var res struct {
+			Success     bool   `json:"success"`
+			TeamSlug    string `json:"teamSlug"`
+			ProjectSlug string `json:"projectSlug"`
+			ProjectName string `json:"projectName"`
+		}
+		json.NewDecoder(resp.Body).Decode(&res)
+
+		if res.Success {
+			color.Green("✔ Linked to Project: %s (%s/%s) 🌸", res.ProjectName, res.TeamSlug, res.ProjectSlug)
+			color.Cyan("Try 'git envware pull' to get your secrets! 🛡️")
+		} else {
+			color.Yellow("⚠️  Project not yet registered in Envware for this Git URL.")
+			color.Cyan("Run 'envw request <team> <project> OWNER' and set the gitUrl in the dashboard. 🌸")
+		}
+		return
+
+	case "push":
+		if isGitMode {
+			if err := exec.Command("git", "rev-parse", "--is-inside-work-tree").Run(); err != nil {
+				color.Red("❌ Not a git repository.")
+				return
+			}
+			
+			team, project, _ := service.ResolveContext("", "")
+			env := ".env"
+
+			// Detect team/project from existing crypto file or context
+			cryptoFile := ".env.crypto"
+			if _, err := os.Stat(cryptoFile); err == nil {
+				t, p, e, _ := service.LoadMetadata(cryptoFile)
+				if t != "" { team = t; project = p; env = e }
+			}
+
+			if team == "" {
+				color.Red("❌ Context not found. Run 'git envware checkout' or specify <team> <project>.")
+				return
+			}
+
+			// 0. Role & Pro Check 🌸🛡️
+			if team != "" {
+				signaturePro, _ := service.getAuthChallenge(pubStr, privKey)
+				checkReq, _ := json.Marshal(PullRequest{PublicKey: pubStr, Signature: signaturePro, TeamSlug: team, ProjectSlug: project, Environment: env})
+				respPro, errPro := http.Post(service.BaseURL+"/pull-secrets", "application/json", bytes.NewBuffer(checkReq))
+				if errPro == nil {
+					var checkResp CommonResponse
+					json.NewDecoder(respPro.Body).Decode(&checkResp)
+					respPro.Body.Close()
+
+					if checkResp.Success {
+						// Role Check: If DEV, skip envware logic and just push code
+						if checkResp.Role == "DEV" {
+							color.Yellow("⚠️  DEV Role: Skipping secret sync. Pushing code only... 🌸")
+							cmdGit := exec.Command("git", "push")
+							cmdGit.Stdout = os.Stdout
+							cmdGit.Stderr = os.Stderr
+							cmdGit.Run()
+							return
+						}
+
+						if checkResp.Project != nil && !checkResp.Project.HasLocalMode {
+							color.Red("❌ Git Integration (Auto-Sync) requires a Pro Subscription. 🌸")
+							color.Yellow("Upgrade with: envw purchase pro %s", team)
+							return
+						}
+					}
+				}
+			}
+
+			color.Cyan("🚀 Git Mode: Encrypting and pushing to repository...")
+			if _, err := os.Stat(cryptoFile); err != nil {
+				color.Red("❌ Error: %s not found. Run 'envw encrypt <team> <project>' once to initialize Local Mode. 🛡️", cryptoFile)
+				return
+			}
+
+			// ... (rest of the git mode logic)
+			color.Cyan("🔐 Step 1: Updating %s and Syncing with Cloud...", cryptoFile)
+			
+			// Exec push remoto (Cloud Sync is now deprecated/dummy, but we keep internal call for structure)
+			pushArgs := []string{os.Args[0], "push", team, project, env}
+			cmdPush := exec.Command(pushArgs[0], pushArgs[1:]...)
+			cmdPush.Env = append(os.Environ(), "ENVW_INTERNAL=true")
+			// No need to fail if cloud sync fails, since we are moving to Local/Git focus
+			cmdPush.Run()
+
+			// Exec encrypt local
+			encArgs := []string{os.Args[0], "encrypt", team, project, env, cryptoFile}
+			cmdEnc := exec.Command(encArgs[0], encArgs[1:]...)
+			cmdEnc.Env = append(os.Environ(), "ENVW_INTERNAL=true")
+			cmdEnc.Stdout = os.Stdout
+			cmdEnc.Stderr = os.Stderr
+			if err := cmdEnc.Run(); err != nil {
+				color.Red("❌ Local encryption failed. 🛡️")
+				return
+			}
+
+			// 2. Git Add
+			color.Cyan("📦 Step 2: Adding to Git stage...")
+			exec.Command("git", "add", cryptoFile).Run()
+
+			// 3. Smart Commit (Amend or New)
+			color.Cyan("📝 Step 3: Committing changes...")
+			checkPush := exec.Command("git", "branch", "-r", "--contains", "HEAD")
+			out, _ := checkPush.Output()
+			
+			if len(strings.TrimSpace(string(out))) == 0 {
+				color.Green("  Merging into last commit (amend)...")
+				exec.Command("git", "commit", "--amend", "--no-edit").Run()
+			} else {
+				color.Yellow("  Last commit already pushed. Creating sync commit...")
+				exec.Command("git", "commit", "-m", "chore(env): sync secrets 🌸").Run()
+			}
+
+			// 4. Push
+			color.Cyan("🚀 Step 4: Pushing to remote...")
+			cmdGit := exec.Command("git", "push")
+			cmdGit.Stdout = os.Stdout
+			cmdGit.Stderr = os.Stderr
+			if err := cmdGit.Run(); err != nil {
+				color.Red("❌ git push failed: %v", err)
+				return
+			}
+
+			color.Green("✔ All set! Code and secrets are synchronized. 🌸🚀")
+			return
+		}
+
+		var team, project string
 		environment := ".env"
-		if len(os.Args) >= 5 {
-			environment = os.Args[4]
+
+		if len(os.Args) >= 4 {
+			team, project = os.Args[2], os.Args[3]
+			if len(os.Args) >= 5 {
+				environment = os.Args[4]
+			}
+		} else {
+			var err error
+			team, project, err = service.ResolveContext("", "")
+			if err != nil {
+				fmt.Println("Usage: push <team> <project> [env-file]")
+				return
+			}
+			if len(os.Args) >= 3 {
+				environment = os.Args[2]
+			}
 		}
 
 		if err := validateEnvironment(environment); err != nil {
@@ -596,8 +873,7 @@ func main() {
 		secretsMap, _ := parseEnvFile(environment)
 		var secrets []Secret
 		for k, v := range secretsMap {
-			s, _ := service.EncryptSecret(v, projectKey, environment)
-			s.Key = k
+			s, _ := service.EncryptFullPair(k, v, projectKey, environment)
 			secrets = append(secrets, s)
 		}
 
@@ -630,14 +906,24 @@ func main() {
 		}
 
 	case "encrypt":
-		if len(os.Args) < 4 {
-			fmt.Println("Usage: encrypt <team> <project> [env-file] [output-file]")
-			return
-		}
-		team, project := os.Args[2], os.Args[3]
+		var team, project string
 		environment := ".env"
-		if len(os.Args) >= 5 {
-			environment = os.Args[4]
+
+		if len(os.Args) >= 4 {
+			team, project = os.Args[2], os.Args[3]
+			if len(os.Args) >= 5 {
+				environment = os.Args[4]
+			}
+		} else {
+			var err error
+			team, project, err = service.ResolveContext("", "")
+			if err != nil {
+				fmt.Println("Usage: encrypt <team> <project> [env-file] [output-file]")
+				return
+			}
+			if len(os.Args) >= 3 {
+				environment = os.Args[2]
+			}
 		}
 
 		if err := validateEnvironment(environment); err != nil {
@@ -648,6 +934,8 @@ func main() {
 		outputFile := environment + ".crypto"
 		if len(os.Args) >= 6 {
 			outputFile = os.Args[5]
+		} else if len(os.Args) == 4 && team != "" { // If arguments were resolved automatically
+			// environment might be correctly set, let's keep it
 		}
 
 		fmt.Print("🔐 Auth & License Check... ")
@@ -678,16 +966,12 @@ func main() {
 			return
 		}
 
-		if pullResp.Project == nil || !pullResp.Project.HasLocalMode {
-			color.Red("FAIL!")
-			color.Yellow("\nLocal Mode is not enabled for this project. 🛡️")
-			color.Cyan("Purchase it with: envw purchase local %s %s\n", team, project)
-			return
-		}
 		color.Green("OK!")
 
 		var projectKey string
+		var encryptedKeyToSave string
 		if pullResp.EncryptedProjectKey != "" {
+			encryptedKeyToSave = pullResp.EncryptedProjectKey
 			projectKeyBytes, err := service.RSADecrypt(pullResp.EncryptedProjectKey, privKey)
 			if err != nil {
 				color.Red("Error decrypting project key: %v. 🌸", err)
@@ -715,6 +999,7 @@ func main() {
 			respInit.Body.Close()
 
 			if keyResp.Success && keyResp.EncryptedProjectKey != "" {
+				encryptedKeyToSave = keyResp.EncryptedProjectKey
 				projectKeyBytes, err := service.RSADecrypt(keyResp.EncryptedProjectKey, privKey)
 				if err != nil {
 					color.Red("Failed to decrypt newly initialized key: %v", err)
@@ -736,36 +1021,49 @@ func main() {
 
 		var secrets []Secret
 		for k, v := range secretsMap {
-			s, _ := service.EncryptSecret(v, projectKey, environment)
-			s.Key = k
+			s, _ := service.EncryptFullPair(k, v, projectKey, environment)
 			secrets = append(secrets, s)
 		}
 
 		// Save as JSON encrypted file
 		payload := map[string]interface{}{
-			"version":     "2.0",
-			"team":        team,
-			"project":     project,
-			"environment": environment,
-			"secrets":     secrets,
+			"version":              "2.2.0",
+			"team":                 team,
+			"project":              project,
+			"environment":          environment,
+			"secrets":              secrets,
+			"project_key_envelope": encryptedKeyToSave,
 		}
 		data, _ := json.MarshalIndent(payload, "", "  ")
 		os.WriteFile(outputFile, data, 0644)
 		color.Green("✔ Locally encrypted file saved to: %s 🛡️🌸", outputFile)
 
 	case "decrypt":
-		if len(os.Args) < 4 {
-			fmt.Println("Usage: decrypt <team> <project> [crypto-file] [output-file]")
-			return
-		}
-		team, project := os.Args[2], os.Args[3]
+		var team, project string
 		cryptoFile := ".env.crypto"
-		if len(os.Args) >= 5 {
-			cryptoFile = os.Args[4]
+
+		if len(os.Args) >= 4 {
+			team, project = os.Args[2], os.Args[3]
+			if len(os.Args) >= 5 {
+				cryptoFile = os.Args[4]
+			}
+		} else {
+			var err error
+			team, project, err = service.ResolveContext("", "")
+			if err != nil {
+				fmt.Println("Usage: decrypt <team> <project> [crypto-file] [output-file]")
+				return
+			}
+			if len(os.Args) >= 3 {
+				cryptoFile = os.Args[2]
+			}
 		}
+
 		outputFile := ".env.decrypted"
 		if len(os.Args) >= 6 {
 			outputFile = os.Args[5]
+		} else if len(os.Args) == 4 && team != "" { // Context resolved
+			// Use original env name if possible from crypto file
 		}
 
 		// Read crypto file first to get environment metadata 🌸
@@ -778,6 +1076,7 @@ func main() {
 		var payload struct {
 			Environment string   `json:"environment"`
 			Secrets     []Secret `json:"secrets"`
+			Envelope    string   `json:"project_key_envelope"`
 		}
 		if err := json.Unmarshal(cryptoData, &payload); err != nil {
 			color.Red("Invalid crypto file format: %v", err)
@@ -789,54 +1088,69 @@ func main() {
 			targetEnv = ".env"
 		}
 
+		var projectKey string
+
+		// 1. Try server first (Standard Flow 🌸)
 		fmt.Print("🔐 Auth & Permission Check... ")
 		signature, err := service.getAuthChallenge(pubStr, privKey)
-		if err != nil {
-			color.Red("Fail: %v", err)
-			return
+		serverOffline := false
+		if err == nil {
+			pullReq, _ := json.Marshal(PullRequest{
+				PublicKey: pubStr, Signature: signature,
+				TeamSlug: team, ProjectSlug: project,
+				Environment: targetEnv,
+			})
+			resp, err := http.Post(service.BaseURL+"/pull-secrets", "application/json", bytes.NewBuffer(pullReq))
+			if err == nil {
+				var pullResp CommonResponse
+				json.NewDecoder(resp.Body).Decode(&pullResp)
+				resp.Body.Close()
+
+				if pullResp.Success {
+					color.Green("OK!")
+					projectKeyBytes, err := service.RSADecrypt(pullResp.EncryptedProjectKey, privKey)
+					if err == nil {
+						projectKey = string(projectKeyBytes)
+					}
+				} else {
+					color.Red("FAIL!")
+					color.Red("Error: %s 🌸", pullResp.Error)
+					return
+				}
+			} else {
+				serverOffline = true
+			}
+		} else {
+			serverOffline = true
 		}
 
-		pullReq, _ := json.Marshal(PullRequest{
-			PublicKey: pubStr, Signature: signature, 
-			TeamSlug: team, ProjectSlug: project, 
-			Environment: targetEnv,
-		})
-		resp, err := http.Post(service.BaseURL+"/pull-secrets", "application/json", bytes.NewBuffer(pullReq))
-		if err != nil {
-			color.Red("Server Offline")
-			return
+		// 2. Resilience Fallback (If offline and user is the Owner/Admin who saved the file 🛡️)
+		if projectKey == "" && serverOffline {
+			if payload.Envelope != "" {
+				fmt.Print("🌐 Server Offline. Attempting Resilience Mode... ")
+				projectKeyBytes, err := service.RSADecrypt(payload.Envelope, privKey)
+				if err == nil {
+					projectKey = string(projectKeyBytes)
+					color.Green("✔ Project key decrypted locally. 🛡️🌸")
+				} else {
+					color.Red("FAIL!")
+					color.Yellow("Offline mode failed: This file's resilience envelope doesn't match your SSH key. 🛡️")
+					return
+				}
+			} else {
+				color.Red("\n❌ Server Offline and no resilience envelope found. 🛡️")
+				return
+			}
 		}
-		var pullResp CommonResponse
-		json.NewDecoder(resp.Body).Decode(&pullResp)
-		resp.Body.Close()
-
-		if !pullResp.Success {
-			color.Red("FAIL!")
-			color.Red("Error: %s 🌸", pullResp.Error)
-			return
-		}
-
-		if pullResp.Project == nil || !pullResp.Project.HasLocalMode {
-			color.Yellow("\nLocal Mode is not enabled for this project. 🛡️")
-			return
-		}
-		color.Green("OK!")
-
-		projectKeyBytes, err := service.RSADecrypt(pullResp.EncryptedProjectKey, privKey)
-		if err != nil {
-			color.Red("Error decrypting project key: %v", err)
-			return
-		}
-		projectKey := string(projectKeyBytes)
 
 		var envContent string
 		for _, s := range payload.Secrets {
-			val, err := service.DecryptSecret(s, projectKey, targetEnv)
+			k, v, err := service.DecryptFullPair(s, projectKey, targetEnv)
 			if err != nil {
-				color.Red("Error decrypting secret %s: %v", s.Key, err)
+				color.Red("Error decrypting secret: %v", err)
 				continue
 			}
-			envContent += fmt.Sprintf("%s=%s\n", s.Key, val)
+			envContent += fmt.Sprintf("%s=%s\n", k, v)
 		}
 
 		os.WriteFile(outputFile, []byte(envContent), 0644)
@@ -844,14 +1158,107 @@ func main() {
 		checkGitIgnore(outputFile)
 
 	case "pull":
-		if len(os.Args) < 4 {
-			fmt.Println("Usage: pull <team> <project> [env-file]")
+		if isGitMode {
+			if err := exec.Command("git", "rev-parse", "--is-inside-work-tree").Run(); err != nil {
+				color.Red("❌ Not a git repository.")
+				return
+			}
+
+			team, project, _ := service.ResolveContext("", "")
+
+			// 1. Check Pro Status before anything 🌸🛡️
+			cryptoFiles, _ := filepath.Glob("*.env*.crypto")
+			if len(cryptoFiles) > 0 || team != "" {
+				t, p := team, project
+				env := ".env"
+				if len(cryptoFiles) > 0 {
+					if mt, mp, me, err := service.LoadMetadata(cryptoFiles[0]); err == nil {
+						t, p, env = mt, mp, me
+					}
+				}
+				
+				if t != "" {
+					signature, _ := service.getAuthChallenge(pubStr, privKey)
+					checkPullReq, _ := json.Marshal(PullRequest{PublicKey: pubStr, Signature: signature, TeamSlug: t, ProjectSlug: p, Environment: env})
+					resp, _ := http.Post(service.BaseURL+"/pull-secrets", "application/json", bytes.NewBuffer(checkPullReq))
+					var checkResp CommonResponse
+					json.NewDecoder(resp.Body).Decode(&checkResp)
+					resp.Body.Close()
+
+					if checkResp.Success && checkResp.Project != nil && !checkResp.Project.HasLocalMode {
+						color.Red("❌ Git Integration requires a Pro Subscription. 🌸")
+						color.Yellow("Upgrade with: envw purchase pro %s", t)
+						return
+					}
+				}
+			}
+
+			color.Cyan("🚀 Git Mode: Synchronizing repository...")
+			
+			// Get current state of .env.crypto for smart pull
+			cryptoFilesPull, _ := filepath.Glob("*.env*.crypto")
+			beforePullInfo := make(map[string]os.FileInfo)
+			for _, f := range cryptoFilesPull {
+				info, _ := os.Stat(f)
+				beforePullInfo[f] = info
+			}
+
+			// 1. Git Pull
+			cmdGitPull := exec.Command("git", "pull")
+			cmdGitPull.Stdout = os.Stdout
+			cmdGitPull.Stderr = os.Stderr
+			if err := cmdGitPull.Run(); err != nil {
+				color.Red("❌ git pull failed: %v", err)
+				return
+			}
+
+			// 2. Smart Cloud Pull (only if .env.crypto changed or explicitly needed)
+			cryptoFilesAfter, _ := filepath.Glob("*.env*.crypto")
+			if len(cryptoFilesAfter) > 0 {
+				for _, cryptoFile := range cryptoFilesAfter {
+					info, _ := os.Stat(cryptoFile)
+					beforeInfo, exists := beforePullInfo[cryptoFile]
+					
+					// Only pull if file is new or modified by git pull 🌸
+					if !exists || info.ModTime().After(beforeInfo.ModTime()) {
+						team, project, env, err := service.LoadMetadata(cryptoFile)
+						if err != nil {
+							continue
+						}
+						
+						color.Cyan("  ✨ Syncing %s (updated in git)...", env)
+						pullArgs := []string{os.Args[0], "decrypt", team, project, cryptoFile, env}
+						cmdPull := exec.Command(pullArgs[0], pullArgs[1:]...)
+						cmdPull.Env = append(os.Environ(), "ENVW_INTERNAL=true")
+						cmdPull.Stdout = os.Stdout
+						cmdPull.Stderr = os.Stderr
+						cmdPull.Run()
+					}
+				}
+				return
+			}
+			color.Yellow("💡 No .env.crypto found. Repository updated.")
 			return
 		}
-		team, project := os.Args[2], os.Args[3]
+
+		var team, project string
 		environment := ".env"
-		if len(os.Args) >= 5 {
-			environment = os.Args[4]
+
+		if len(os.Args) >= 4 {
+			team, project = os.Args[2], os.Args[3]
+			if len(os.Args) >= 5 {
+				environment = os.Args[4]
+			}
+		} else {
+			var err error
+			team, project, err = service.ResolveContext("", "")
+			if err != nil {
+				fmt.Println("Usage: pull <team> <project> [env-file]")
+				return
+			}
+			if len(os.Args) >= 3 {
+				environment = os.Args[2]
+			}
 		}
 
 		if err := validateEnvironment(environment); err != nil {
@@ -877,8 +1284,13 @@ func main() {
 		json.NewDecoder(resp.Body).Decode(&pullResp)
 		resp.Body.Close()
 
-		if !pullResp.Success || (len(pullResp.Secrets) == 0 && pullResp.EncryptedProjectKey == "") {
+		if !pullResp.Success {
 			color.Red("Error: %s 🌸", pullResp.Error)
+			return
+		}
+
+		if len(pullResp.Secrets) == 0 {
+			color.Yellow("💡 No secrets found on Cloud for %s/%s (%s). Local file kept unchanged. 🌸", team, project, environment)
 			return
 		}
 
@@ -891,12 +1303,12 @@ func main() {
 
 		var envContent string
 		for _, s := range pullResp.Secrets {
-			val, err := service.DecryptSecret(s, projectKey, environment)
+			k, v, err := service.DecryptFullPair(s, projectKey, environment)
 			if err != nil {
-				color.Red("Error decrypting secret %s: %v", s.Key, err)
+				color.Red("Error decrypting secret: %v", err)
 				continue
 			}
-			envContent += fmt.Sprintf("%s=%s\n", s.Key, val)
+			envContent += fmt.Sprintf("%s=%s\n", k, v)
 		}
 
 		os.WriteFile(environment, []byte(envContent), 0644)
@@ -906,13 +1318,13 @@ func main() {
 		checkGitIgnore(environment)
 
 	case "status":
-		teamSlug := ""
-		if len(os.Args) >= 3 {
-			teamSlug = os.Args[2]
-		}
-		projectSlug := ""
+		var teamSlug, projectSlug string
 		if len(os.Args) >= 4 {
-			projectSlug = os.Args[3]
+			teamSlug, projectSlug = os.Args[2], os.Args[3]
+		} else if len(os.Args) == 3 {
+			teamSlug = os.Args[2]
+		} else {
+			teamSlug, projectSlug, _ = service.ResolveContext("", "")
 		}
 
 		fmt.Print("🔐 Auth... ")
@@ -948,31 +1360,130 @@ func main() {
 				}
 				fmt.Println("\nRun \"envw status <team-slug>\" for more info. 🌸")
 			}
-			if finalResp.Team != nil {
-				fmt.Printf("\n🏢 TEAM: %s", finalResp.Team.Name)
-				if !finalResp.Team.IsVerified {
-					color.Yellow(" [UNDER VERIFICATION]")
-				}
-				fmt.Println()
-				for _, p := range finalResp.Team.Projects {
-					fmt.Printf("  - %s (%s)\n", p.Name, p.Slug)
+		if finalResp.Team != nil {
+			fmt.Printf("\n🏢 TEAM: %s", finalResp.Team.Name)
+			if !finalResp.Team.IsVerified {
+				color.Yellow(" [UNDER VERIFICATION]")
+			}
+			fmt.Println()
+			fmt.Println("🚀 PROJECTS:")
+			for _, p := range finalResp.Team.Projects {
+				fmt.Printf("  - %s (%s) | %d users\n", p.Name, p.Slug, p.UsersCount)
+			}
+			if len(finalResp.Team.Members) > 0 {
+				fmt.Println("\n👥 MEMBERS:")
+				for _, m := range finalResp.Team.Members {
+					roleColor := color.FgWhite
+					if m.Role == "OWNER" {
+						roleColor = color.FgMagenta
+					} else if m.Role == "ADMIN" {
+						roleColor = color.FgCyan
+					}
+					color.New(roleColor).Printf("  - %s (%s)", m.Email, m.Role)
+					if m.Fingerprint != "" {
+						fmt.Printf(" | %s", m.Fingerprint)
+					}
+					if m.IsCurrent {
+						color.New(color.FgHiBlack).Print(" (you)")
+					}
+					fmt.Println()
 				}
 			}
-			if finalResp.Project != nil {
-				fmt.Printf("\n🚀 PROJECT: %s\n", finalResp.Project.Name)
-				for _, u := range finalResp.Project.Users {
-					fmt.Printf("  👤 %s (%s)\n", u.Email, u.Role)
+		}
+		if finalResp.Project != nil {
+			fmt.Printf("\n🚀 PROJECT: %s (%s)\n", finalResp.Project.Name, finalResp.Project.Slug)
+			fmt.Printf("📊 Users: %d/%d | Local Mode: %v\n", finalResp.Project.UsersUsed, finalResp.Project.MaxUsers, finalResp.Project.HasLocalMode)
+			fmt.Println("\n👥 ACCESS LIST:")
+			for _, u := range finalResp.Project.Users {
+				roleColor := color.FgWhite
+				if u.Role == "OWNER" {
+					roleColor = color.FgMagenta
+				} else if u.Role == "ADMIN" {
+					roleColor = color.FgCyan
 				}
+				color.New(roleColor).Printf("  - %s (%s)", u.Email, u.Role)
+				if u.Fingerprint != "" {
+					fmt.Printf(" | %s", u.Fingerprint)
+				}
+				if u.IsCurrent {
+					color.New(color.FgHiBlack).Print(" (you)")
+				}
+				fmt.Println()
+			}
+		}
+		}
+
+	case "link":
+		if len(os.Args) < 4 {
+			fmt.Println("Usage: envw link <team> <project> [git-url]")
+			return
+		}
+		team, project := os.Args[2], os.Args[3]
+		gitUrl := ""
+		if len(os.Args) >= 5 {
+			gitUrl = os.Args[4]
+		} else {
+			gitUrl = service.GetGitRemoteURL()
+		}
+
+		if gitUrl == "" {
+			color.Red("❌ Error: Git URL not provided and not inside a Git repository.")
+			return
+		}
+
+		fmt.Print("🔐 Auth... ")
+		signature, err := service.getAuthChallenge(pubStr, privKey)
+		if err != nil {
+			color.Red("Fail: %v", err)
+			return
+		}
+		color.Green("OK!")
+
+		linkReq := map[string]string{
+			"publicKey":   pubStr,
+			"signature":   signature,
+			"teamSlug":    team,
+			"projectSlug": project,
+			"gitUrl":      gitUrl,
+		}
+		reqBody, _ := json.Marshal(linkReq)
+		resp, err := http.Post(service.BaseURL+"/projects/link", "application/json", bytes.NewBuffer(reqBody))
+		if err != nil {
+			color.Red("Server Offline")
+			return
+		}
+		defer resp.Body.Close()
+
+		var finalResp CommonResponse
+		json.NewDecoder(resp.Body).Decode(&finalResp)
+		if finalResp.Success {
+			color.Green("✔ %s", finalResp.Message)
+		} else {
+			color.Red("❌ Link failed: %s", finalResp.Error)
+		}
+		return
+
+	case "request":
+		var team, project, role string
+		if len(os.Args) >= 5 {
+			team, project, role = os.Args[2], os.Args[3], os.Args[4]
+		} else {
+			var err error
+			team, project, err = service.ResolveContext("", "")
+			if err != nil {
+				fmt.Println("Usage: request <team> <project> <role>")
+				fmt.Println("Or run inside a Git repo: git envware request <role>")
+				return
+			}
+			if len(os.Args) >= 3 {
+				role = os.Args[2]
+			} else {
+				role = "DEVELOPER"
 			}
 		}
 
-	case "request":
-		if len(os.Args) < 5 {
-			return
-		}
-		team, project, role := os.Args[2], os.Args[3], os.Args[4]
 		reader := bufio.NewReader(os.Stdin)
-		fmt.Print("👤 Name: ")
+		fmt.Printf("👤 Name [for project %s/%s]: ", team, project)
 		userName, _ := reader.ReadString('\n')
 		hostname, _ := os.Hostname()
 
@@ -998,6 +1509,22 @@ func main() {
 		respReq.Body.Close()
 		if res.Success {
 			color.Green("✨ %s", res.Message)
+
+			// DX Auto-Link: If OWNER and inside a git repo, link it! 🌸
+			if strings.ToUpper(role) == "OWNER" {
+				gitUrl := service.GetGitRemoteURL()
+				if gitUrl != "" {
+					fmt.Print("🔗 Linking with Git repository... ")
+					signatureLink, _ := service.getAuthChallenge(pubStr, privKey)
+					linkReq := map[string]string{
+						"publicKey": pubStr, "signature": signatureLink,
+						"teamSlug": team, "projectSlug": project, "gitUrl": gitUrl,
+					}
+					reqBody, _ := json.Marshal(linkReq)
+					http.Post(service.BaseURL+"/projects/link", "application/json", bytes.NewBuffer(reqBody))
+					color.Green("OK!")
+				}
+			}
 		} else {
 			color.Red("Fail: %s", res.Error)
 		}
@@ -1082,27 +1609,23 @@ func main() {
 					fmt.Printf("  - %s (%s) | %d secrets\n", p.Name, p.Slug, p.SecretsCount)
 				}
 			}
-			fmt.Println()
-		} else {
-			color.Red("❌ Error: %s", finalResp.Error)
-		}
-
-	case "secrets":
-		if len(os.Args) < 4 {
-			fmt.Println("Usage: secrets <team> <project> [env-file]")
+			fmt.Println("\nRun \"envw remove project <team> <project-slug>\" to delete a project. 🗑️🌸")
 			return
 		}
-		team, project := os.Args[2], os.Args[3]
-		environment := ".env"
-		if len(os.Args) >= 5 {
-			environment = os.Args[4]
-		}
+		color.Red("Error: %s 🌸", finalResp.Error)
 
-		if err := validateEnvironment(environment); err != nil {
-			color.Red("❌ %v", err)
+	case "remove":
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: remove <category> [args...]")
+			fmt.Println("Categories: project, user, team")
+			fmt.Println("\nExamples:")
+			fmt.Println("  envw remove project <team> <project-slug>")
+			fmt.Println("  envw remove user <team> <fingerprint>")
+			fmt.Println("  envw remove team <team-slug>")
 			return
 		}
-
+		category := os.Args[2]
+		
 		fmt.Print("🔐 Auth... ")
 		signature, err := service.getAuthChallenge(pubStr, privKey)
 		if err != nil {
@@ -1111,26 +1634,90 @@ func main() {
 		}
 		color.Green("OK!")
 
-		pullReq, _ := json.Marshal(PullRequest{PublicKey: pubStr, Signature: signature, TeamSlug: team, ProjectSlug: project, Environment: environment})
-		respP, err := http.Post(service.BaseURL+"/pull-secrets", "application/json", bytes.NewBuffer(pullReq))
-		if err != nil {
-			color.Red("Server Offline")
-			return
-		}
-		var pullResp CommonResponse
-		json.NewDecoder(respP.Body).Decode(&pullResp)
-		respP.Body.Close()
+		if category == "project" {
+			if len(os.Args) < 5 {
+				fmt.Println("Usage: remove project <team> <project-slug>")
+				return
+			}
+			team, project := os.Args[3], os.Args[4]
+			
+			color.Red("\n⚠️  CRITICAL: This will PERMANENTLY delete project '%s' and ALL its secrets.", project)
+			fmt.Print("Are you sure? [y/N]: ")
+			reader := bufio.NewReader(os.Stdin)
+			confirm, _ := reader.ReadString('\n')
+			if strings.TrimSpace(strings.ToLower(confirm)) != "y" {
+				color.Yellow("Deletion canceled. 🌸")
+				return
+			}
 
-		if !pullResp.Success || len(pullResp.Secrets) == 0 {
-			color.Red("Error: No secrets found or Access denied. 🌸")
-			return
-		}
+			req, _ := json.Marshal(map[string]string{
+				"publicKey": pubStr, "signature": signature,
+				"teamSlug": team, "projectSlug": project,
+			})
+			resp, _ := http.Post(service.BaseURL+"/project-remove", "application/json", bytes.NewBuffer(req))
+			var finalResp CommonResponse
+			json.NewDecoder(resp.Body).Decode(&finalResp)
+			resp.Body.Close()
+			if finalResp.Success {
+				color.Green("✔ %s", finalResp.Message)
+			} else {
+				color.Red("Error: %s 🌸", finalResp.Error)
+			}
 
-		fmt.Printf("\n🔑 Keys in %s/%s (%s):\n", team, project, environment)
-		for _, s := range pullResp.Secrets {
-			fmt.Printf("  - %s\n", s.Key)
+		} else if category == "user" {
+			if len(os.Args) < 5 {
+				fmt.Println("Usage: remove user <team> <fingerprint>")
+				return
+			}
+			team, fingerprint := os.Args[3], os.Args[4]
+			
+			req, _ := json.Marshal(map[string]string{
+				"publicKey": pubStr, "signature": signature,
+				"teamSlug": team, "fingerprint": fingerprint,
+			})
+			resp, _ := http.Post(service.BaseURL+"/team-remove", "application/json", bytes.NewBuffer(req))
+			var finalResp CommonResponse
+			json.NewDecoder(resp.Body).Decode(&finalResp)
+			resp.Body.Close()
+			if finalResp.Success {
+				color.Green("✔ %s", finalResp.Message)
+			} else {
+				color.Red("Error: %s 🌸", finalResp.Error)
+			}
+		} else if category == "team" {
+			if len(os.Args) < 4 {
+				fmt.Println("Usage: remove team <team-slug>")
+				return
+			}
+			team := os.Args[3]
+
+			color.Red("\n⚠️  CRITICAL: This will PERMANENTLY delete team '%s' and cancel all associated billing.", team)
+			fmt.Print("Confirm deletion? [y/N]: ")
+			reader := bufio.NewReader(os.Stdin)
+			confirm, _ := reader.ReadString('\n')
+			if strings.TrimSpace(strings.ToLower(confirm)) != "y" {
+				color.Yellow("Deletion canceled. 🌸")
+				return
+			}
+
+			req, _ := json.Marshal(map[string]string{
+				"publicKey": pubStr, "signature": signature,
+				"teamSlug": team,
+			})
+			resp, _ := http.Post(service.BaseURL+"/team-delete", "application/json", bytes.NewBuffer(req))
+			var finalResp CommonResponse
+			json.NewDecoder(resp.Body).Decode(&finalResp)
+			resp.Body.Close()
+			if finalResp.Success {
+				color.Green("✔ %s", finalResp.Message)
+			} else {
+				color.Red("Error: %s 🌸", finalResp.Error)
+			}
 		}
-		fmt.Println()
+	case "secrets":
+		color.Yellow("💡 The 'secrets' command is deprecated. All metadata, including key names, is now encrypted for your safety. 🛡️")
+		color.Cyan("Use 'envw pull' or 'envw decrypt' to view your secrets. 🌸")
+		return
 
 	case "accept":
 		if len(os.Args) < 2 {
@@ -1170,9 +1757,9 @@ func main() {
 				fmt.Printf("🚀 Project: %s/%s (%s)\n", req.TeamSlug, req.ProjectSlug, req.Role)
 				fmt.Printf("🛡️  Fingerprint: SHA256:%s\n", fingerprint)
 			}
-			fmt.Printf("\nRun \"envw accept <id>\" to grant access. 🌸\n")
+			fmt.Printf("\nRun \"envw accept <id>\" or \"envw accept <fingerprint>\" to grant access. 🌸\n")
 		} else {
-			requestId := os.Args[2]
+			target := os.Args[2] // Pode ser ID ou Fingerprint 🌸
 
 			fmt.Print("🔐 Auth... ")
 			signatureA, err := service.getAuthChallenge(pubStr, privKey)
@@ -1192,14 +1779,15 @@ func main() {
 
 			var targetRequest *PendingRequest
 			for _, r := range listResp.Requests {
-				if r.Id == requestId {
+				fp := service.GetFingerprint(r.PublicKey)
+				if r.Id == target || fp == target || "SHA256:"+fp == target {
 					targetRequest = &r
 					break
 				}
 			}
 
 			if targetRequest == nil {
-				color.Red("Request ID not found. 🌸")
+				color.Red("Request ID or Fingerprint not found. 🌸")
 				return
 			}
 
@@ -1266,7 +1854,7 @@ func main() {
 			}
 
 			approveReq, _ := json.Marshal(ApproveRequest{
-				PublicKey: pubStr, Signature: signatureApp, RequestId: requestId, EncryptedProjectKey: encData.EncryptedData,
+				PublicKey: pubStr, Signature: signatureApp, RequestId: targetRequest.Id, EncryptedProjectKey: encData.EncryptedData,
 			})
 			respApp, _ := http.Post(service.BaseURL+"/projects/requests/approve", "application/json", bytes.NewBuffer(approveReq))
 			var finalResp CommonResponse
@@ -1284,31 +1872,73 @@ func main() {
 
 	case "purchase":
 		if len(os.Args) < 3 {
-			fmt.Println("Usage: purchase <category> <team-slug> [project-slug/action] [action]")
-			fmt.Println("Categories: users, projects")
+			fmt.Println("Usage: purchase <category> <team-slug> [project-slug/action] [action] [quantity]")
+			fmt.Println("Categories: pro, users, projects, teams")
 			fmt.Println("Actions: add, sub (default: add)")
 			fmt.Println("\nExamples:")
-			fmt.Println("  envw purchase users myteam myproject")
-			fmt.Println("  envw purchase projects myteam")
-			fmt.Println("  envw purchase projects myteam sub")
+			fmt.Println("  envw purchase pro myteam")
+			fmt.Println("  envw purchase users myteam myproject add 5")
+			fmt.Println("  envw purchase projects myteam add 2")
 			return
 		}
 		category, teamSlug := os.Args[2], os.Args[3]
 		projectSlug := ""
 		action := "add"
+		quantity := "1"
 
 		if category == "users" {
 			if len(os.Args) < 5 {
-				fmt.Println("Usage for users: purchase users <team-slug> <project-slug> [action]")
+				fmt.Println("Usage for users: purchase users <team-slug> <project-slug> [action] [quantity]")
 				return
 			}
 			projectSlug = os.Args[4]
 			if len(os.Args) >= 6 {
 				action = os.Args[5]
 			}
+			if len(os.Args) >= 7 {
+				quantity = os.Args[6]
+			}
 		} else {
 			if len(os.Args) >= 5 {
 				action = os.Args[4]
+			}
+			if len(os.Args) >= 6 {
+				quantity = os.Args[5]
+			}
+		}
+
+		// --- Confirmation Logic 🌸🛡️ ---
+		qtyInt, _ := strconv.Atoi(quantity)
+		if action == "add" {
+			summary := ""
+			price := 0
+			switch category {
+			case "users":
+				totalUsers := qtyInt * 10
+				summary = fmt.Sprintf("%d User Packs (+%d total user slots)", qtyInt, totalUsers)
+				price = qtyInt * 10
+			case "projects":
+				totalProjects := qtyInt * 5
+				summary = fmt.Sprintf("%d Project Packs (+%d total project slots)", qtyInt, totalProjects)
+				price = qtyInt * 10
+			case "teams":
+				summary = fmt.Sprintf("%d Extra Team Pack (+%d total team slot)", qtyInt, qtyInt)
+				price = qtyInt * 10
+			}
+
+			if summary != "" {
+				color.Cyan("\n🛒 PURCHASE SUMMARY:")
+				fmt.Printf("Item:  %s\n", summary)
+				fmt.Printf("Total: USD %d.00/month\n", price)
+				fmt.Print("\nDo you want to proceed to payment? [y/N]: ")
+				
+				reader := bufio.NewReader(os.Stdin)
+				confirm, _ := reader.ReadString('\n')
+				confirm = strings.TrimSpace(strings.ToLower(confirm))
+				if confirm != "y" && confirm != "yes" {
+					color.Yellow("Purchase canceled. 🌸")
+					return
+				}
 			}
 		}
 
@@ -1327,6 +1957,7 @@ func main() {
 			"action":      action,
 			"teamSlug":    teamSlug,
 			"projectSlug": projectSlug,
+			"quantity":    quantity,
 		})
 
 		resp, err := http.Post(service.BaseURL+"/purchase", "application/json", bytes.NewBuffer(purReq))
@@ -1444,45 +2075,60 @@ func main() {
 		fmt.Println("Share this with your team OWNER/ADMIN to verify your identity. 🛡️ 🌸")
 
 	case "version":
-		fmt.Printf("envware-go version 2.1.0 🌸\n")
+		fmt.Printf("envware-go version 2.2.0 🌸\n")
 
 	case "help":
-		showUsage()
+		showUsage(isGitMode)
 
 	default:
 		if action != "" && action != "-h" && action != "--help" {
 			color.Yellow("Unknown command: %s", action)
 		}
-		showUsage()
+		showUsage(isGitMode)
 	}
 }
 
-func showUsage() {
-	fmt.Println("\nUsage: envw <command> [args...]")
+func showUsage(isGitMode bool) {
+	if isGitMode {
+		fmt.Println("\nUsage: git envware <command> [args...]")
+		fmt.Println("\nGit-Integrated Commands:")
+		fmt.Println("  checkout <url>                Clone repository and link to Envware 🌸")
+		fmt.Println("  link <team> <project> [url]    Link current Git repo to Envware 🌸")
+		fmt.Println("  request <role>                Request access using current Git context 🛡️")
+		fmt.Println("  pull                          1. git pull")
+		fmt.Println("                                2. decrypt local .env.crypto")
+		fmt.Println("  push                          1. encrypt local .env")
+		fmt.Println("                                2. git add & commit --amend")
+		fmt.Println("                                3. git push")
+		fmt.Println("\nYou can also use any standard envw command here.")
+	} else {
+		fmt.Println("\nUsage: envw <command> [args...] 🌸")
+	}
 	fmt.Println("\nCore Commands:")
-	fmt.Println("  push <team> <project> [env]    Encrypt and upload secrets")
-	fmt.Println("  pull <team> <project> [env]    Download and decrypt secrets")
-	fmt.Println("  request <t> <p> <role>         Request access (ADMIN, PREVIEW, DEV)")
+	fmt.Println("  checkout <url>                 Clone and link project")
+	fmt.Println("  link <team> <project> [url]    Link current Git repo to Envware 🌸")
+	fmt.Println("  push [team] [project] [env]    Encrypt and upload secrets (Auto-resolves context)")
+	fmt.Println("  pull [team] [project] [env]    Download and decrypt secrets (Auto-resolves context)")
+	fmt.Println("  request <t> <p> <role>         Request access (OWNER, ADMIN, DEV)")
 	fmt.Println("  accept [id]                    List or approve access requests")
+	fmt.Println("  remove <cat> [args...]         Remove projects or users")
 	fmt.Println("\nEnvironments (Allowed Names):")
 	fmt.Println("  .env, .env.production          Production (OWNER/ADMIN only)")
 	fmt.Println("  .env.preview                   Preview (OWNER/ADMIN/PREVIEW)")
 	fmt.Println("  .env.development               Development (All roles)")
-	fmt.Println("\nLocal Mode Commands (Premium 🛡️):")
-	fmt.Println("  encrypt <team> <project> [env] Encrypt .env to local .env.crypto")
-	fmt.Println("  decrypt <team> <project> [file] Decrypt .env.crypto to .env.decrypted")
+	fmt.Println("\nLocal Mode Commands:")
+	fmt.Println("  encrypt [team] [project] [env] Encrypt .env to local .env.crypto")
+	fmt.Println("  decrypt [team] [project] [fil] Decrypt .env.crypto to .env.decrypted")
 	fmt.Println("\nInfo Commands:")
 	fmt.Println("  status [team] [project]        Show info about user, team or project")
 	fmt.Println("  projects <team>                List projects in a team")
 	fmt.Println("  envs <team> <project>          List environments in a project")
-	fmt.Println("  secrets <team> <project> [env] List secret keys (names only)")
 	fmt.Println("  fingerprint                    Show your machine's fingerprint")
 	fmt.Println("  version                        Show current version")
 	fmt.Println("\nBilling Commands:")
-	fmt.Println("  purchase teams                 Buy extra team slot ($10/mo)")
-	fmt.Println("  purchase projects <team>       Buy +5 project slots ($10/mo)")
-	fmt.Println("  purchase users <t> <p>         Buy +10 user slots ($10/mo)")
-	fmt.Println("  purchase local <t> <p>         Unlock Local Mode for project ($10)")
+	fmt.Println("  purchase teams [qty]           Buy extra team slots ($10/mo)")
+	fmt.Println("  purchase projects <team> [qty] Buy extra project slots per pack ($10/mo)")
+	fmt.Println("  purchase users <t> <p> [qty]   Buy extra user slots per pack ($10/mo)")
 	fmt.Println("\nOther:")
 	fmt.Println("  set-email <email>              Set your account email")
 	fmt.Println("  docs [--llm]                   Show documentation")

@@ -47,11 +47,16 @@ chmod +x $BINARY_NAME
 echo "📦 Installing to /usr/local/bin (may require sudo)..."
 if [ -w "/usr/local/bin" ]; then
     mv $BINARY_NAME /usr/local/bin/
+    ln -sf /usr/local/bin/envw /usr/local/bin/git-envware
+    ln -sf /usr/local/bin/envw /usr/local/bin/git-envw
 else
     sudo mv $BINARY_NAME /usr/local/bin/
+    sudo ln -sf /usr/local/bin/envw /usr/local/bin/git-envware
+    sudo ln -sf /usr/local/bin/envw /usr/local/bin/git-envw
 fi
 
 echo ""
-echo "🌸 envware 2.0 (Go Engine) installed successfully!"
+echo "🌸 envware 2.1.5 (Go Engine) installed successfully!"
 echo "✨ Run 'envw status <team>' to get started."
-echo "🚀 Welcome to the Zero-Trust future."
+echo "🚀 Git Integration: You can now use 'git envware pull' and 'git envware push'!"
+echo "💎 Welcome to the Zero-Trust future."
