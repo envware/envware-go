@@ -1620,7 +1620,7 @@ func main() {
 			fmt.Println("Categories: project, user, team")
 			fmt.Println("\nExamples:")
 			fmt.Println("  envw remove project <team> <project-slug>")
-			fmt.Println("  envw remove user <team> <fingerprint>")
+			fmt.Println("  envw remove user <team> <project-slug> <fingerprint>")
 			fmt.Println("  envw remove team <team-slug>")
 			return
 		}
@@ -1641,7 +1641,7 @@ func main() {
 			}
 			team, project := os.Args[3], os.Args[4]
 			
-			color.Red("\n⚠️  CRITICAL: This will PERMANENTLY delete project '%s' and ALL its secrets.", project)
+			color.Red("\n⚠️  CRITICAL: This will PERMANENTLY delete project '%s' and ALL its encryption keys.", project)
 			fmt.Print("Are you sure? [y/N]: ")
 			reader := bufio.NewReader(os.Stdin)
 			confirm, _ := reader.ReadString('\n')
@@ -1665,17 +1665,33 @@ func main() {
 			}
 
 		} else if category == "user" {
-			if len(os.Args) < 5 {
-				fmt.Println("Usage: remove user <team> <fingerprint>")
-				return
+			var team, project, fingerprint string
+			if len(os.Args) >= 6 {
+				team, project, fingerprint = os.Args[3], os.Args[4], os.Args[5]
+			} else {
+				var err error
+				team, project, err = service.ResolveContext("", "")
+				if err != nil {
+					fmt.Println("Usage: remove user <team> <project> <fingerprint>")
+					fmt.Println("Or inside a repo: git envware remove user <fingerprint>")
+					return
+				}
+				if len(os.Args) >= 4 {
+					fingerprint = os.Args[3]
+				} else {
+					fmt.Println("Usage: remove user <fingerprint>")
+					return
+				}
 			}
-			team, fingerprint := os.Args[3], os.Args[4]
 			
 			req, _ := json.Marshal(map[string]string{
-				"publicKey": pubStr, "signature": signature,
-				"teamSlug": team, "fingerprint": fingerprint,
+				"publicKey":   pubStr,
+				"signature":   signature,
+				"teamSlug":    team,
+				"projectSlug": project,
+				"fingerprint": fingerprint,
 			})
-			resp, _ := http.Post(service.BaseURL+"/team-remove", "application/json", bytes.NewBuffer(req))
+			resp, _ := http.Post(service.BaseURL+"/project-user-remove", "application/json", bytes.NewBuffer(req))
 			var finalResp CommonResponse
 			json.NewDecoder(resp.Body).Decode(&finalResp)
 			resp.Body.Close()
@@ -1871,40 +1887,36 @@ func main() {
 		}
 
 	case "purchase":
-		if len(os.Args) < 3 {
+		var category, teamSlug, projectSlug, action, quantity string
+		action = "add"
+		quantity = "1"
+
+		if len(os.Args) >= 4 {
+			category, teamSlug = os.Args[2], os.Args[3]
+			
+			if category == "users" {
+				if len(os.Args) >= 5 {
+					projectSlug = os.Args[4]
+					if len(os.Args) >= 6 { action = os.Args[5] }
+					if len(os.Args) >= 7 { quantity = os.Args[6] }
+				} else {
+					// Try resolve project context for user packs
+					_, p, _ := service.ResolveContext("", "")
+					projectSlug = p
+				}
+			} else {
+				if len(os.Args) >= 5 { action = os.Args[4] }
+				if len(os.Args) >= 6 { quantity = os.Args[5] }
+			}
+		}
+
+		if teamSlug == "" {
 			fmt.Println("Usage: purchase <category> <team-slug> [project-slug/action] [action] [quantity]")
-			fmt.Println("Categories: pro, users, projects, teams")
-			fmt.Println("Actions: add, sub (default: add)")
+			fmt.Println("Categories: users, projects, teams")
 			fmt.Println("\nExamples:")
-			fmt.Println("  envw purchase pro myteam")
 			fmt.Println("  envw purchase users myteam myproject add 5")
 			fmt.Println("  envw purchase projects myteam add 2")
 			return
-		}
-		category, teamSlug := os.Args[2], os.Args[3]
-		projectSlug := ""
-		action := "add"
-		quantity := "1"
-
-		if category == "users" {
-			if len(os.Args) < 5 {
-				fmt.Println("Usage for users: purchase users <team-slug> <project-slug> [action] [quantity]")
-				return
-			}
-			projectSlug = os.Args[4]
-			if len(os.Args) >= 6 {
-				action = os.Args[5]
-			}
-			if len(os.Args) >= 7 {
-				quantity = os.Args[6]
-			}
-		} else {
-			if len(os.Args) >= 5 {
-				action = os.Args[4]
-			}
-			if len(os.Args) >= 6 {
-				quantity = os.Args[5]
-			}
 		}
 
 		// --- Confirmation Logic 🌸🛡️ ---
@@ -2194,13 +2206,27 @@ func parseEnvFile(path string) (map[string]string, error) {
 	res := make(map[string]string)
 	sc := bufio.NewScanner(file)
 	for sc.Scan() {
-		ln := sc.Text()
-		if ln == "" || strings.HasPrefix(ln, "#") {
+		ln := strings.TrimSpace(sc.Text())
+		if ln == "" {
 			continue
 		}
-		parts := strings.SplitN(ln, "=", 2)
-		if len(parts) == 2 {
-			res[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+		
+		// Se a linha tem um '=', nós processamos ela.
+		// Isso inclui variáveis normais (KEY=VAL) e comentadas (# KEY=VAL). 🌸
+		if strings.Contains(ln, "=") {
+			parts := strings.SplitN(ln, "=", 2)
+			key := strings.TrimSpace(parts[0])
+			val := strings.TrimSpace(parts[1])
+			
+			// Se não for uma linha comentada, vamos tentar limpar comentários inline
+			// ex: API_KEY=123 # comentário -> valor: 123
+			if !strings.HasPrefix(key, "#") {
+				if idx := strings.Index(val, " #"); idx != -1 {
+					val = strings.TrimSpace(val[:idx])
+				}
+			}
+			
+			res[key] = val
 		}
 	}
 	return res, nil
