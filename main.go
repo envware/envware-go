@@ -485,7 +485,15 @@ func main() {
 
 			var activeEnvs []string
 			filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
-				if err == nil && !info.IsDir() && strings.Contains(path, ".env") && !strings.HasSuffix(path, ".crypto") && !strings.HasSuffix(path, ".decrypted") {
+				if err != nil { return nil }
+				if info.IsDir() {
+					name := info.Name()
+					if name == "node_modules" || name == "dist" || name == ".git" || name == ".next" || name == "vendor" || name == ".turbo" {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if strings.Contains(path, ".env") && !strings.HasSuffix(path, ".crypto") && !strings.HasSuffix(path, ".decrypted") {
 					if _, err := os.Stat(path + ".crypto"); err == nil {
 						activeEnvs = append(activeEnvs, path)
 					}
@@ -575,7 +583,15 @@ func main() {
 			exec.Command("git", "pull").Run()
 			var cryptoFiles []string
 			filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
-				if err == nil && !info.IsDir() && strings.HasSuffix(path, ".crypto") && strings.Contains(path, ".env") {
+				if err != nil { return nil }
+				if info.IsDir() {
+					name := info.Name()
+					if name == "node_modules" || name == "dist" || name == ".git" || name == ".next" || name == "vendor" || name == ".turbo" {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if strings.HasSuffix(path, ".crypto") && strings.Contains(path, ".env") {
 					cryptoFiles = append(cryptoFiles, path)
 				}
 				return nil
