@@ -2,10 +2,10 @@
 
 import Link from 'next/link'
 import { Github, LayoutDashboard, TerminalSquare } from 'lucide-react'
-import { useTranslations } from 'next-intl'
+import { useI18n } from '@/components/I18nProvider'
 
 export function Header() {
-  const t = useTranslations('Nav')
+  const { t } = useI18n()
 
   return (
     <header className="sticky top-0 z-50 border-b border-zinc-800 bg-[#0a0c10]/80 backdrop-blur-xl">
@@ -21,8 +21,8 @@ export function Header() {
         </Link>
 
         <nav className="hidden items-center gap-7 text-sm font-medium text-zinc-400 md:flex">
-          <Link href="/docs" className="transition hover:text-white">{t('docs')}</Link>
-          <Link href="/simulador" className="transition hover:text-white">{t('simulator')}</Link>
+          <Link href="/docs" className="transition hover:text-white">{t.Nav.docs}</Link>
+          <Link href="/simulador" className="transition hover:text-white">{t.Nav.simulator}</Link>
           <Link href="/dashboard" className="inline-flex items-center gap-1.5 transition hover:text-white">
             <LayoutDashboard size={14} />
             Dashboard

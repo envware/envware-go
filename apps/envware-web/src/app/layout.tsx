@@ -2,7 +2,9 @@ import type { Metadata } from 'next'
 import { Inter } from 'next/font/google'
 import { Toaster } from 'sonner'
 import { Analytics } from "@vercel/analytics/next"
-import '@/globals.css'
+import { I18nProvider } from '@/components/I18nProvider'
+
+import './globals.css'
 
 const inter = Inter({ subsets: ['latin'] })
 
@@ -30,10 +32,12 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark">
       <Analytics />
-      <body className={`${inter.className} min-h-screen bg-[#0a0c10] text-zinc-100 antialiased`}>
-        {children}
-        <Toaster theme="dark" />
-      </body>
+      <I18nProvider>
+        <body className={`${inter.className} min-h-screen bg-[#0a0c10] text-zinc-100 antialiased`}>
+          {children}
+          <Toaster theme="dark" />
+        </body>
+      </I18nProvider>
     </html>
   )
 }

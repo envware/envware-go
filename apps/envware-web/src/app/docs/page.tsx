@@ -17,6 +17,8 @@ import {
 import { toast } from 'sonner'
 import { Header } from '@/components/Header'
 
+export const dynamic = 'force-dynamic'
+
 const terminalScenarios = {
   install: [
     '$ curl -fsSL https://www.envware.dev/install.sh | bash',
