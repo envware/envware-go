@@ -6,7 +6,7 @@
 
 set -e
 
-REPO="envware/envware-go" # Nome oficial do repositório
+REPO="envware/envware-go"
 BINARY_NAME="envw"
 
 # 1. Detectar OS e Arquitetura
@@ -25,19 +25,18 @@ LATEST_TAG=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | grep
 
 if [ -z "$LATEST_TAG" ]; then
     echo "❌ Could not find latest release. Please check the repository: https://github.com/$REPO"
-    echo "💡 Make sure you have created at least one Release on GitHub!"
     exit 1
 fi
 
 echo "🚀 Downloading Git Envware $LATEST_TAG for $OS ($ARCH)..."
 
-# 3. Nome do arquivo (Seguindo o padrão do build-all.sh)
+# 3. Nome do arquivo
 FILENAME="envware-$OS-$ARCH"
 if [ "$OS" = "windows" ]; then
     FILENAME="$FILENAME.exe"
 fi
 
-URL="https://github.com/$REPO/releases/download/$LATEST_TAG/$FILENAME"
+URL="https://github.com/$REPO/downloads/$LATEST_TAG/$FILENAME"
 
 # 4. Download
 curl -L -o $BINARY_NAME $URL
@@ -47,14 +46,11 @@ chmod +x $BINARY_NAME
 echo "📦 Installing to /usr/local/bin (may require sudo)..."
 if [ -w "/usr/local/bin" ]; then
     mv $BINARY_NAME /usr/local/bin/
-    ln -sf /usr/local/bin/envw /usr/local/bin/git-envw
 else
     sudo mv $BINARY_NAME /usr/local/bin/
-    sudo ln -sf /usr/local/bin/envw /usr/local/bin/git-envw
 fi
 
 echo ""
-echo "🌸 Git Envware $LATEST_TAG installed successfully!"
-echo "✨ Run 'envw status <team>' to get started."
-echo "🚀 Git Integration: You can now use 'git envw pull' and 'git envw push'!"
-echo "💎 Welcome to the Zero-Trust future."
+echo "✅ Git Envware $LATEST_TAG installed successfully!"
+echo "✨ Run 'envw --help' to get started."
+echo "🚀 You can now use 'git envw pull' and 'git envw push'!"
