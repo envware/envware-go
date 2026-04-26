@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 🌸 Git Envware installer
-# This script detects your OS/Arch, downloads the latest binary from GitHub,
+# This script detects your OS/Arch, download the latest binary from GitHub,
 # and installs it to your local system.
 
 set -e
@@ -36,7 +36,7 @@ if [ "$OS" = "windows" ]; then
     FILENAME="$FILENAME.exe"
 fi
 
-URL="https://github.com/$REPO/downloads/$LATEST_TAG/$FILENAME"
+URL="https://github.com/$REPO/download/$LATEST_TAG/$FILENAME"
 
 # 4. Download
 curl -L -o $BINARY_NAME $URL
