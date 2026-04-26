@@ -6,7 +6,7 @@
 
 set -e
 
-REPO="Git Envware/Git Envware" # Nome oficial do repositório
+REPO="envware/envware-go" # Nome oficial do repositório
 BINARY_NAME="envw"
 
 # 1. Detectar OS e Arquitetura
