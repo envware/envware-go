@@ -47,16 +47,14 @@ chmod +x $BINARY_NAME
 echo "📦 Installing to /usr/local/bin (may require sudo)..."
 if [ -w "/usr/local/bin" ]; then
     mv $BINARY_NAME /usr/local/bin/
-    ln -sf /usr/local/bin/envw /usr/local/bin/git-Git Envware
     ln -sf /usr/local/bin/envw /usr/local/bin/git-envw
 else
     sudo mv $BINARY_NAME /usr/local/bin/
-    sudo ln -sf /usr/local/bin/envw /usr/local/bin/git-Git Envware
     sudo ln -sf /usr/local/bin/envw /usr/local/bin/git-envw
 fi
 
 echo ""
 echo "🌸 Git Envware $LATEST_TAG installed successfully!"
 echo "✨ Run 'envw status <team>' to get started."
-echo "🚀 Git Integration: You can now use 'git Git Envware pull' and 'git Git Envware push'!"
+echo "🚀 Git Integration: You can now use 'git envw pull' and 'git envw push'!"
 echo "💎 Welcome to the Zero-Trust future."
