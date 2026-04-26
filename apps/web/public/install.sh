@@ -36,7 +36,7 @@ if [ "$OS" = "windows" ]; then
     FILENAME="$FILENAME.exe"
 fi
 
-URL="https://github.com/$REPO/download/$LATEST_TAG/$FILENAME"
+URL="https://github.com/$REPO/releases/download/$LATEST_TAG/$FILENAME"
 
 # 4. Download
 curl -L -o $BINARY_NAME $URL
