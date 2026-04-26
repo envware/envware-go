@@ -32,7 +32,7 @@ fi
 echo "🚀 Downloading Git Envware $LATEST_TAG for $OS ($ARCH)..."
 
 # 3. Nome do arquivo (Seguindo o padrão do build-all.sh)
-FILENAME="Git Envware-$OS-$ARCH"
+FILENAME="envware-$OS-$ARCH"
 if [ "$OS" = "windows" ]; then
     FILENAME="$FILENAME.exe"
 fi
@@ -56,7 +56,7 @@ else
 fi
 
 echo ""
-echo "🌸 Git Envware 2.2.0 (Go Engine) installed successfully!"
+echo "🌸 Git Envware $LATEST_TAG installed successfully!"
 echo "✨ Run 'envw status <team>' to get started."
 echo "🚀 Git Integration: You can now use 'git Git Envware pull' and 'git Git Envware push'!"
 echo "💎 Welcome to the Zero-Trust future."
