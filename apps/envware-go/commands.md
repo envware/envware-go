@@ -1,50 +1,27 @@
-push {TEAM} {PROJECT} {ENV}
-pull {TEAM} {PROJECT} {ENV}
+=== Comandos do Envware ===
 
-status {TEAM} [PROJECT]
+// git envw <comando>
 
-request TEAM PROJECT ROLE
-fingerprint
-accept FINGERPRINT
+// Basics
+clone <git-url>     Clona repo e conecta ao Envware
+pull [team] [project]  Baixa e descriptografa secrets
+push [team] [project] Criptografa e sobe secrets
+status                 Mostra status do projeto
 
-backup {TEAM} {PROJECT} - baixa secrets criptografado
-restore {TEAM} {PROJECT} - envia backup secrests
+// Local Mode (sem servidor)
+encrypt <file>         Criptografa arquivo localmente
+decrypt <file> <out>   Descriptografa arquivo localmente
 
-purchase TEAM PLAN [--cancel] - compra um novo team
-purchase USERS {TEAM} {PROJECT} - compra 10 usuarios
+// Acesso
+request <team> <project> <role>  Solicita acesso
+accept [<id>]                   Aprova solicitação
 
----- apenas para role CI
-show TEAM PROJECT ENV SECRET
+// Device Management (SSH-based auth)
+pair <code>         Pareia CLI com servidor (gere código no dashboard)
+devices              Lista dispositivos pareados
+unpair <device-id>  Remove dispositivo pareado
 
-----
-
-roles fixas
-------
-OWNER - purchase, purchase --cancel
-ADMIN - push, pull,accept
-DEV - pull
-SERVER - pull
-CI - show
-
-
--------------
-exemplos
-
-push google chrome .env
-push google chrome .env.development
-pull google chrome .env.production
-
-status google - lista todos os projetos do team google
-status google chrome - lista todos os usuarios do projeto chrome
-
----------------------
-novos precos e planos
-FREE - 1 TEAM, 3 PROJETOS, 5 USERS/PROJETOS
-
-TEAM EXTRA - 5 PROJETOS, 10 USERS/PROJETOS - 10USD
-USER EXTRA - 10 USERS aplicado a um team/projeto - 10USD
-
-
-
-
-
+// Admin
+fingerprint          Mostra sua fingerprint SSH
+version              Versão do CLI
+help                 Ajuda

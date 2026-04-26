@@ -235,13 +235,35 @@ func NewEnvwareService() *EnvwareService {
 }
 
 func (s *EnvwareService) GetSSHKeys() (string, string, error) {
-	privPath := filepath.Join(s.HomeDir, ".ssh", "id_rsa")
-	privBytes, err := os.ReadFile(privPath)
-	if err != nil {
-		return "", "", err
+	sshDir := filepath.Join(s.HomeDir, ".ssh")
+	
+	// Try common key names
+	keyNames := []string{"id_rsa", "id_ed25519", "id_ecdsa", "keys/id_rsa", "keys/id_ed25519"}
+	
+	for _, keyName := range keyNames {
+		privPath := filepath.Join(sshDir, keyName)
+		privBytes, err := os.ReadFile(privPath)
+		if err == nil {
+			pubBytes, _ := os.ReadFile(privPath + ".pub")
+			return string(privBytes), string(pubBytes), nil
+		}
 	}
-	pubBytes, _ := os.ReadFile(privPath + ".pub")
-	return string(privBytes), string(pubBytes), nil
+	
+	// Fallback: scan .ssh directory for any private key
+	files, _ := os.ReadDir(sshDir)
+	for _, f := range files {
+		if f.IsDir() || strings.HasPrefix(f.Name(), ".") {
+			continue
+		}
+		privPath := filepath.Join(sshDir, f.Name())
+		privBytes, err := os.ReadFile(privPath)
+		if err == nil && strings.Contains(string(privBytes), "PRIVATE KEY") {
+			pubBytes, _ := os.ReadFile(privPath + ".pub")
+			return string(privBytes), string(pubBytes), nil
+		}
+	}
+	
+	return "", "", fmt.Errorf("no SSH private key found in ~/.ssh")
 }
 
 func (s *EnvwareService) GetFingerprint(publicKey string) string {
@@ -527,9 +549,9 @@ func main() {
 	}
 
 	switch action {
-	case "checkout":
+	case "clone":
 		if len(os.Args) < 3 {
-			color.Red("Usage: git envware checkout <git-url>")
+			color.Red("Usage: git envw clone <git-url>")
 			return
 		}
 		gitUrl := os.Args[2]
@@ -1212,22 +1234,25 @@ func main() {
 
 func showUsage(isGitMode bool) {
 	if isGitMode {
-		fmt.Println("\nUsage: git envware <command> [args...]")
-		fmt.Println("  checkout <url>                Clone repository and link to Envware 🌸")
-		fmt.Println("  link <team>                   Link current repo to a team (creates project if needed)")
-		fmt.Println("  pull                          Pull and decrypt secrets")
-		fmt.Println("  push                          Encrypt and push secrets")
-		fmt.Println("  request <role>               Request access (DEV, PREVIEW, ADMIN)")
-		fmt.Println("  accept [<id>]                 List or approve pending requests")
-		fmt.Println("  status                        Show project status")
+		fmt.Println("\nUsage: git envw <command> [args...]")
+		fmt.Println("  clone <git-url>            Clone repo and link to Envware")
+		fmt.Println("  pull [team] [project]        Download and decrypt secrets")
+		fmt.Println("  push [team] [project]        Encrypt and upload secrets")
+		fmt.Println("  status                       Show project status")
+		fmt.Println("  encrypt <file>               Encrypt file locally")
+		fmt.Println("  decrypt <file> <output>      Decrypt file locally")
+		fmt.Println("  request <team> <project> <role>  Request access")
+		fmt.Println("  accept [<id>]                List or approve requests")
+		fmt.Println("  pair <code>                  Pair CLI with server")
+		fmt.Println("  devices                      List paired devices")
+		fmt.Println("  unpair <device-id>           Unpair device")
 	} else {
 		fmt.Println("\nUsage: envw <command> [args...] 🌸")
 	}
-	fmt.Println("\nAdmin Commands:")
-	fmt.Println("  buy teams|projects|users     Purchase more slots")
-	fmt.Println("  remove team|project|user    Remove resources")
 	fmt.Println("\nOther:")
-	fmt.Println("  version, help")
+	fmt.Println("  fingerprint                  Show your SSH fingerprint")
+	fmt.Println("  version                       CLI version")
+	fmt.Println("  help                          Show this help")
 }
 
 func parseEnvFile(path string) (map[string]string, error) {
