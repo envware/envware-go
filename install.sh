@@ -57,6 +57,5 @@ fi
 
 echo ""
 echo "🌸 envware 2.1.5 (Go Engine) installed successfully!"
-echo "✨ Run 'envw status <team>' to get started."
-echo "🚀 Git Integration: You can now use 'git envware pull' and 'git envware push'!"
+echo "✨ Use: git envw clone | git envw pull | git envw push (projeto = git remote origin)."
 echo "💎 Welcome to the Zero-Trust future."

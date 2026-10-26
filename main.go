@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,16 +56,6 @@ type Secret struct {
 	IvV string `json:"iv"`  // IV for Value
 	Tag string `json:"tag"` // Auth Tag (Value)
 	TagK string `json:"tk"`  // Auth Tag (Key)
-}
-
-type PushRequest struct {
-	PublicKey           string   `json:"publicKey"`
-	Signature           string   `json:"signature"`
-	TeamSlug            string   `json:"teamSlug"`
-	ProjectSlug         string   `json:"projectSlug"`
-	Environment         string   `json:"environment"`
-	Secrets             []Secret `json:"secrets"`
-	EncryptedProjectKey string   `json:"encryptedProjectKey,omitempty"`
 }
 
 type PullRequest struct {
@@ -208,22 +199,6 @@ func (s *EnvwareService) GetFingerprint(publicKey string) string {
 	return base64.StdEncoding.EncodeToString(hash[:])
 }
 
-func (s *EnvwareService) LoadMetadata(path string) (team, project, env string, err error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", "", "", err
-	}
-	var payload struct {
-		Team        string `json:"team"`
-		Project     string `json:"project"`
-		Environment string `json:"environment"`
-	}
-	if err := json.Unmarshal(data, &payload); err != nil {
-		return "", "", "", err
-	}
-	return payload.Team, payload.Project, payload.Environment, nil
-}
-
 func (s *EnvwareService) deriveKey(projectKey string, environment string) ([]byte, error) {
 	salt := "envware-salt"
 	if environment != "" && environment != ".env" {
@@ -330,37 +305,179 @@ func (s *EnvwareService) GetGitRemoteURL() string {
 	return strings.TrimSpace(string(out))
 }
 
-func (s *EnvwareService) ResolveContext(team, project string) (string, string, error) {
-	if team != "" && project != "" {
-		return team, project, nil
+func mustBeGitInvoked() {
+	if strings.HasPrefix(filepath.Base(os.Args[0]), "git-") {
+		return
 	}
+	color.Red("Use apenas via Git: git envw <comando> (instale o binário como git-envw no PATH)")
+	os.Exit(1)
+}
 
-	gitUrl := s.GetGitRemoteURL()
-	if gitUrl != "" {
-		resp, err := http.Get(s.BaseURL + "/projects/resolve?gitUrl=" + gitUrl)
-		if err == nil {
-			defer resp.Body.Close()
-			var res struct {
-				Success     bool   `json:"success"`
-				TeamSlug    string `json:"teamSlug"`
-				ProjectSlug string `json:"projectSlug"`
-			}
-			json.NewDecoder(resp.Body).Decode(&res)
-			if res.Success {
-				return res.TeamSlug, res.ProjectSlug, nil
+func requireGitWorktree() error {
+	if err := exec.Command("git", "rev-parse", "--is-inside-work-tree").Run(); err != nil {
+		return fmt.Errorf("não é um repositório Git")
+	}
+	return nil
+}
+
+func requireGitRemote(s *EnvwareService) error {
+	if s.GetGitRemoteURL() == "" {
+		return fmt.Errorf("defina o remote origin (git remote add origin <url>)")
+	}
+	return nil
+}
+
+// OriginResolveResult resultado de GET/POST /projects/resolve (com membership se publicKey enviado).
+type OriginResolveResult struct {
+	ProjectRegistered bool
+	Member            bool
+	MembershipKnown   bool
+	TeamSlug          string
+	ProjectSlug       string
+	ProjectName       string
+}
+
+// FetchOriginResolve consulta o projeto pelo URL Git; com publicKey verifica se o utilizador é membro do team.
+func (s *EnvwareService) FetchOriginResolve(gitURL, pubStr string) (*OriginResolveResult, error) {
+	if gitURL == "" {
+		return nil, fmt.Errorf("git remote origin não configurado")
+	}
+	payload := map[string]string{"gitUrl": gitURL}
+	if strings.TrimSpace(pubStr) != "" {
+		payload["publicKey"] = pubStr
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.Post(s.BaseURL+"/projects/resolve", "application/json", bytes.NewBuffer(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var raw struct {
+		Success     bool   `json:"success"`
+		TeamSlug    string `json:"teamSlug"`
+		ProjectSlug string `json:"projectSlug"`
+		ProjectName string `json:"projectName"`
+		Member      *bool  `json:"member,omitempty"`
+		Error       string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+	out := &OriginResolveResult{}
+	if !raw.Success {
+		return out, nil
+	}
+	out.ProjectRegistered = true
+	out.TeamSlug = raw.TeamSlug
+	out.ProjectSlug = raw.ProjectSlug
+	out.ProjectName = raw.ProjectName
+	if raw.Member != nil {
+		out.MembershipKnown = true
+		out.Member = *raw.Member
+	}
+	return out, nil
+}
+
+func runAccessRequest(service *EnvwareService, pubStr string, privKey *rsa.PrivateKey, team, project, role string) {
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Printf("👤 Nome: ")
+	userName, _ := reader.ReadString('\n')
+	signature, err := service.getAuthChallenge(pubStr, privKey)
+	if err != nil {
+		color.Red("❌ Auth: %v", err)
+		return
+	}
+	reqData, _ := json.Marshal(AccessRequest{
+		PublicKey: pubStr, Signature: signature, TeamSlug: team, ProjectSlug: project, Role: role, UserName: strings.TrimSpace(userName),
+	})
+	respReq, err := http.Post(service.BaseURL+"/request-access", "application/json", bytes.NewBuffer(reqData))
+	if err != nil {
+		color.Red("❌ %v", err)
+		return
+	}
+	var res CommonResponse
+	json.NewDecoder(respReq.Body).Decode(&res)
+	if res.Success {
+		color.Green("✨ %s", res.Message)
+		if strings.ToUpper(role) == "OWNER" {
+			gitURL := service.GetGitRemoteURL()
+			if gitURL != "" {
+				signatureLink, _ := service.getAuthChallenge(pubStr, privKey)
+				linkReq := map[string]string{"publicKey": pubStr, "signature": signatureLink, "teamSlug": team, "projectSlug": project, "gitUrl": gitURL}
+				reqBody, _ := json.Marshal(linkReq)
+				http.Post(service.BaseURL+"/projects/link", "application/json", bytes.NewBuffer(reqBody))
 			}
 		}
+	} else if res.Error != "" {
+		color.Red("❌ %s", res.Error)
 	}
+}
 
-	cryptoFiles, _ := filepath.Glob("*.env*.crypto")
-	if len(cryptoFiles) > 0 {
-		t, p, _, err := s.LoadMetadata(cryptoFiles[0])
-		if err == nil {
-			return t, p, nil
+func ensureTeamProjectAccess(service *EnvwareService, pubStr string, privKey *rsa.PrivateKey) (team, project string, ok bool) {
+	gitURL := service.GetGitRemoteURL()
+	if gitURL == "" {
+		color.Red("❌ defina o remote origin (git remote add origin <url>)")
+		return "", "", false
+	}
+	res, err := service.FetchOriginResolve(gitURL, pubStr)
+	if err != nil {
+		color.Red("❌ Envware: %v", err)
+		return "", "", false
+	}
+	if !res.ProjectRegistered {
+		color.Yellow("Este repositório não usa Envware — o remote origin não está registado na plataforma.")
+		return "", "", false
+	}
+	if !res.MembershipKnown {
+		color.Yellow("Não foi possível verificar se pertences ao team (resposta incompleta do servidor).")
+		return "", "", false
+	}
+	if !res.Member {
+		color.Yellow("A tua chave SSH ainda não faz parte do team deste projeto no Envware.")
+		fmt.Print("Queres enviar um pedido de acesso como DEVELOPER? [s/N]: ")
+		var ans string
+		fmt.Scanln(&ans)
+		ans = strings.TrimSpace(strings.ToLower(ans))
+		if ans == "s" || ans == "sim" || ans == "y" || ans == "yes" {
+			runAccessRequest(service, pubStr, privKey, res.TeamSlug, res.ProjectSlug, "DEVELOPER")
 		}
+		color.Cyan("Sem acesso ao projeto até um administrador aprovar o pedido.")
+		return "", "", false
 	}
+	return res.TeamSlug, res.ProjectSlug, true
+}
 
-	return "", "", fmt.Errorf("could not resolve context")
+func postPullSecrets(s *EnvwareService, pubStr string, privKey *rsa.PrivateKey, teamSlug, projectSlug, environment string) (CommonResponse, int, error) {
+	sig, err := s.getAuthChallenge(pubStr, privKey)
+	if err != nil {
+		return CommonResponse{}, 0, err
+	}
+	body, err := json.Marshal(PullRequest{
+		PublicKey: pubStr, Signature: sig,
+		TeamSlug: teamSlug, ProjectSlug: projectSlug, Environment: environment,
+	})
+	if err != nil {
+		return CommonResponse{}, 0, err
+	}
+	resp, err := http.Post(s.BaseURL+"/pull-secrets", "application/json", bytes.NewBuffer(body))
+	if err != nil {
+		return CommonResponse{}, 0, err
+	}
+	defer resp.Body.Close()
+	var out CommonResponse
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	return out, resp.StatusCode, nil
+}
+
+func isSkippableDir(name string) bool {
+	switch name {
+	case "node_modules", "dist", ".git", ".next", "vendor", ".turbo", "build", "coverage", ".vercel":
+		return true
+	}
+	return false
 }
 
 func validateEnvironment(env string) error {
@@ -377,20 +494,97 @@ func validateEnvironment(env string) error {
 }
 
 func main() {
-	binaryName := filepath.Base(os.Args[0])
-	isGitMode := strings.HasPrefix(binaryName, "git-") && os.Getenv("ENVW_INTERNAL") != "true"
-
 	color.New(color.FgCyan, color.Bold).Println("🌸 envware-go ENGINE v2.2.0")
 	if len(os.Args) < 2 {
-		showUsage(isGitMode)
+		showUsage()
 		return
 	}
 
 	action := os.Args[1]
+
+	if action == "version" {
+		fmt.Println("envware-go version 2.2.0 🌸")
+		return
+	}
+	if action == "help" {
+		showUsage()
+		return
+	}
+
+	mustBeGitInvoked()
+
+	if action == "clone" {
+		service := NewEnvwareService()
+		if len(os.Args) < 3 {
+			color.Red("Uso: git envw clone <url>")
+			return
+		}
+		gitURL := os.Args[2]
+		color.Cyan("🚀 git clone %s...", gitURL)
+		cmdClone := exec.Command("git", "clone", gitURL)
+		cmdClone.Stdout = os.Stdout
+		cmdClone.Stderr = os.Stderr
+		if err := cmdClone.Run(); err != nil {
+			color.Red("❌ git clone falhou: %v", err)
+			return
+		}
+		parts := strings.Split(gitURL, "/")
+		folderName := strings.TrimSuffix(parts[len(parts)-1], ".git")
+		_ = os.Chdir(folderName)
+
+		privStr, pubStr, keyErr := service.GetSSHKeys()
+		pubForResolve := ""
+		var privKey *rsa.PrivateKey
+		if keyErr == nil {
+			pubForResolve = pubStr
+			pemBlock, _ := pem.Decode([]byte(privStr))
+			if pemBlock != nil {
+				if key, err := x509.ParsePKCS1PrivateKey(pemBlock.Bytes); err == nil {
+					privKey = key
+				} else if pk8, err := x509.ParsePKCS8PrivateKey(pemBlock.Bytes); err == nil {
+					privKey = pk8.(*rsa.PrivateKey)
+				}
+			}
+		}
+
+		color.Cyan("🌸 A consultar Envware…")
+		res, err := service.FetchOriginResolve(gitURL, pubForResolve)
+		if err != nil {
+			color.Red("❌ Envware: %v", err)
+			return
+		}
+		if !res.ProjectRegistered {
+			color.Yellow("Este projeto não usa Envware — este URL Git não está registado na plataforma.")
+			return
+		}
+		if keyErr != nil || !res.MembershipKnown {
+			color.Green("✔ Projeto registado no Envware: %s (%s/%s) 🌸", res.ProjectName, res.TeamSlug, res.ProjectSlug)
+			color.Cyan("Configura chaves SSH em ~/.ssh para verificares o teu acesso ao team.")
+			return
+		}
+		if res.Member {
+			color.Green("✔ Projeto: %s (%s/%s) 🌸", res.ProjectName, res.TeamSlug, res.ProjectSlug)
+			color.Cyan("Corre `git envw pull` para obter secrets. 🛡️")
+			return
+		}
+		color.Yellow("A tua chave SSH ainda não faz parte do team deste projeto no Envware.")
+		fmt.Print("Queres enviar um pedido de acesso como DEVELOPER? [s/N]: ")
+		var ans string
+		fmt.Scanln(&ans)
+		ans = strings.TrimSpace(strings.ToLower(ans))
+		if (ans == "s" || ans == "sim" || ans == "y" || ans == "yes") && privKey != nil {
+			runAccessRequest(service, pubStr, privKey, res.TeamSlug, res.ProjectSlug, "DEVELOPER")
+			color.Cyan("Quando o pedido for aprovado, corre `git envw pull`.")
+		} else if (ans == "s" || ans == "sim" || ans == "y" || ans == "yes") && privKey == nil {
+			color.Yellow("Não foi possível assinar o pedido (chave privada inválida).")
+		}
+		return
+	}
+
 	service := NewEnvwareService()
 	privStr, pubStr, err := service.GetSSHKeys()
 	if err != nil {
-		color.Red("Error loading keys: %v", err)
+		color.Red("Erro ao carregar chaves SSH: %v", err)
 		return
 	}
 
@@ -404,45 +598,15 @@ func main() {
 	}
 
 	switch action {
-	case "checkout":
-		if len(os.Args) < 3 {
-			color.Red("Usage: git envware checkout <git-url>")
-			return
-		}
-		gitUrl := os.Args[2]
-
-		color.Cyan("🚀 git clone %s...", gitUrl)
-		cmdClone := exec.Command("git", "clone", gitUrl)
-		cmdClone.Stdout = os.Stdout
-		cmdClone.Stderr = os.Stderr
-		if err := cmdClone.Run(); err != nil {
-			color.Red("❌ git clone failed: %v", err)
-			return
-		}
-
-		parts := strings.Split(gitUrl, "/")
-		folderName := strings.TrimSuffix(parts[len(parts)-1], ".git")
-		os.Chdir(folderName)
-
-		color.Cyan("🌸 Linking with Envware...")
-		resp, err := http.Get(service.BaseURL + "/projects/resolve?gitUrl=" + gitUrl)
-		if err == nil {
-			defer resp.Body.Close()
-			var res struct {
-				Success     bool   `json:"success"`
-				TeamSlug    string `json:"teamSlug"`
-				ProjectSlug string `json:"projectSlug"`
-				ProjectName string `json:"projectName"`
-			}
-			json.NewDecoder(resp.Body).Decode(&res)
-			if res.Success {
-				color.Green("✔ Linked to Project: %s (%s/%s) 🌸", res.ProjectName, res.TeamSlug, res.ProjectSlug)
-				color.Cyan("Try 'git envware pull' to get your secrets! 🛡️")
-			}
-		}
-		return
-
 	case "link":
+		if err := requireGitWorktree(); err != nil {
+			color.Red("❌ %v", err)
+			return
+		}
+		if err := requireGitRemote(service); err != nil {
+			color.Red("❌ %v", err)
+			return
+		}
 		var team, project, gitUrl string
 		if len(os.Args) >= 4 {
 			team, project = os.Args[2], os.Args[3]
@@ -452,7 +616,7 @@ func main() {
 				gitUrl = service.GetGitRemoteURL()
 			}
 		} else {
-			fmt.Println("Usage: envw link <team> <project> [url]")
+			color.Red("Uso: git envw link <team> <project> [url]")
 			return
 		}
 
@@ -476,190 +640,265 @@ func main() {
 		return
 
 	case "push":
-		if isGitMode {
-			if err := exec.Command("git", "rev-parse", "--is-inside-work-tree").Run(); err != nil {
-				color.Red("❌ Not a git repository.")
-				return
-			}
-			color.Cyan("🚀 Git Mode: Encrypting and pushing to repository...")
-
-			var activeEnvs []string
-			filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
-				if err != nil { return nil }
-				if info.IsDir() {
-					name := info.Name()
-					if name == "node_modules" || name == "dist" || name == ".git" || name == ".next" || name == "vendor" || name == ".turbo" {
-						return filepath.SkipDir
-					}
-					return nil
-				}
-				if strings.Contains(path, ".env") && !strings.HasSuffix(path, ".crypto") && !strings.HasSuffix(path, ".decrypted") {
-					if _, err := os.Stat(path + ".crypto"); err == nil {
-						activeEnvs = append(activeEnvs, path)
-					}
-				}
-				return nil
-			})
-
-			if len(activeEnvs) == 0 {
-				color.Yellow("💡 No active .env files with .crypto found. Initializing Local Mode for current folder...")
-				// Fallback to standard logic (omitted for brevity, assume already handled)
-			} else {
-				for _, envFile := range activeEnvs {
-					cryptoFile := envFile + ".crypto"
-					dir := filepath.Dir(envFile)
-					baseEnv := filepath.Base(envFile)
-					team, project, _, err := service.LoadMetadata(cryptoFile)
-					if err != nil { continue }
-
-					color.Cyan("  🔒 Syncing %s...", envFile)
-					encArgs := []string{os.Args[0], "encrypt", team, project, baseEnv, cryptoFile}
-					cmdEnc := exec.Command(encArgs[0], encArgs[1:]...)
-					cmdEnc.Env = append(os.Environ(), "ENVW_INTERNAL=true", "ENVW_CWD="+dir)
-					cmdEnc.Run()
-					exec.Command("git", "add", cryptoFile).Run()
-				}
-
-				color.Cyan("📝 Committing changes...")
-				checkPush := exec.Command("git", "branch", "-r", "--contains", "HEAD")
-				out, _ := checkPush.Output()
-				if len(strings.TrimSpace(string(out))) == 0 {
-					exec.Command("git", "commit", "--amend", "--no-edit").Run()
-				} else {
-					exec.Command("git", "commit", "-m", "chore(env): sync monorepo secrets 🌸").Run()
-				}
-
-				color.Cyan("🚀 Pushing to remote...")
-				cmdGit := exec.Command("git", "push")
-				cmdGit.Stdout = os.Stdout
-				cmdGit.Stderr = os.Stderr
-				cmdGit.Run()
-				color.Green("✔ All set! Monorepo is synchronized. 🌸🚀")
-				return
-			}
+		if err := requireGitWorktree(); err != nil {
+			color.Red("❌ %v", err)
+			return
 		}
-
-		var team, project string
-		environment := ".env"
-		if len(os.Args) >= 4 {
-			team, project = os.Args[2], os.Args[3]
-			if len(os.Args) >= 5 { environment = os.Args[4] }
-		} else {
-			team, project, _ = service.ResolveContext("", "")
+		if err := requireGitRemote(service); err != nil {
+			color.Red("❌ %v", err)
+			return
 		}
-
-		fmt.Print("🔐 Auth... ")
-		signature, _ := service.getAuthChallenge(pubStr, privKey)
-		color.Green("OK!")
-
-		pullReq, _ := json.Marshal(PullRequest{PublicKey: pubStr, Signature: signature, TeamSlug: team, ProjectSlug: project, Environment: environment})
-		respPull, _ := http.Post(service.BaseURL+"/pull-secrets", "application/json", bytes.NewBuffer(pullReq))
-		var pullResp CommonResponse
-		json.NewDecoder(respPull.Body).Decode(&pullResp)
-		respPull.Body.Close()
-
-		var projectKey string
-		if pullResp.EncryptedProjectKey != "" {
-			projectKeyBytes, _ := service.RSADecrypt(pullResp.EncryptedProjectKey, privKey)
-			projectKey = string(projectKeyBytes)
-		} else {
-			// Init logic (omitted)
-		}
-
-		secretsMap, _ := parseEnvFile(environment)
-		var secrets []Secret
-		for k, v := range secretsMap {
-			s, _ := service.EncryptFullPair(k, v, projectKey, environment)
-			secrets = append(secrets, s)
-		}
-
-		pushReq := PushRequest{PublicKey: pubStr, Signature: signature, TeamSlug: team, ProjectSlug: project, Environment: environment, Secrets: secrets}
-		reqBody, _ := json.Marshal(pushReq)
-		http.Post(service.BaseURL+"/secrets/push", "application/json", bytes.NewBuffer(reqBody))
-		color.Green("✔ Secrets pushed successfully! 🌸🚀")
-
-	case "pull":
-		if isGitMode {
-			exec.Command("git", "pull").Run()
-			var cryptoFiles []string
-			filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
-				if err != nil { return nil }
-				if info.IsDir() {
-					name := info.Name()
-					if name == "node_modules" || name == "dist" || name == ".git" || name == ".next" || name == "vendor" || name == ".turbo" {
-						return filepath.SkipDir
-					}
-					return nil
-				}
-				if strings.HasSuffix(path, ".crypto") && strings.Contains(path, ".env") {
-					cryptoFiles = append(cryptoFiles, path)
-				}
-				return nil
-			})
-
-			for _, cryptoFile := range cryptoFiles {
-				dir := filepath.Dir(cryptoFile)
-				envName := strings.TrimSuffix(filepath.Base(cryptoFile), ".crypto")
-				team, project, _, _ := service.LoadMetadata(cryptoFile)
-				pullArgs := []string{os.Args[0], "decrypt", team, project, cryptoFile, filepath.Join(dir, envName)}
-				cmdPull := exec.Command(pullArgs[0], pullArgs[1:]...)
-				cmdPull.Env = append(os.Environ(), "ENVW_INTERNAL=true")
-				cmdPull.Run()
-			}
-			color.Green("✔ Monorepo synchronized. 🌸🚀")
+		team, project, ok := ensureTeamProjectAccess(service, pubStr, privKey)
+		if !ok {
 			return
 		}
 
-		var team, project string
-		environment := ".env"
-		if len(os.Args) >= 4 {
-			team, project = os.Args[2], os.Args[3]
-			if len(os.Args) >= 5 { environment = os.Args[4] }
-		} else {
-			team, project, _ = service.ResolveContext("", "")
+		color.Cyan("🔒 Encriptar secrets (origin → %s/%s)…", team, project)
+
+		var envFiles []string
+		filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			if info.IsDir() {
+				if isSkippableDir(info.Name()) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			base := filepath.Base(path)
+			if !strings.Contains(base, ".env") {
+				return nil
+			}
+			if strings.HasSuffix(path, ".crypto") || strings.HasSuffix(path, ".decrypted") {
+				return nil
+			}
+			envFiles = append(envFiles, path)
+			return nil
+		})
+
+		if len(envFiles) == 0 {
+			color.Yellow("Nenhum ficheiro .env encontrado no repositório.")
+			return
 		}
 
-		signature, _ := service.getAuthChallenge(pubStr, privKey)
-		pullReq, _ := json.Marshal(PullRequest{PublicKey: pubStr, Signature: signature, TeamSlug: team, ProjectSlug: project, Environment: environment})
-		resp, _ := http.Post(service.BaseURL+"/pull-secrets", "application/json", bytes.NewBuffer(pullReq))
-		var pullResp CommonResponse
-		json.NewDecoder(resp.Body).Decode(&pullResp)
-		
-		projectKeyBytes, _ := service.RSADecrypt(pullResp.EncryptedProjectKey, privKey)
-		projectKey := string(projectKeyBytes)
+		var toAdd []string
+		for _, envFile := range envFiles {
+			environment := filepath.Base(envFile)
+			if err := validateEnvironment(environment); err != nil {
+				color.Yellow("Ignorado (ambiente inválido): %s", envFile)
+				continue
+			}
+			pullResp, st, err := postPullSecrets(service, pubStr, privKey, team, project, environment)
+			if err != nil {
+				color.Yellow("Erro API %s: %v", envFile, err)
+				continue
+			}
+			if st != http.StatusOK || pullResp.EncryptedProjectKey == "" {
+				msg := pullResp.Error
+				if msg == "" {
+					msg = fmt.Sprintf("HTTP %d", st)
+				}
+				color.Yellow("Sem acesso ou sem chave — ignorado: %s (%s)", envFile, msg)
+				continue
+			}
+			pkb, err := service.RSADecrypt(pullResp.EncryptedProjectKey, privKey)
+			if err != nil {
+				color.Yellow("Erro ao desencriptar chave do projeto: %s", envFile)
+				continue
+			}
+			projectKey := string(pkb)
 
-		var envContent string
-		for _, s := range pullResp.Secrets {
-			k, v, _ := service.DecryptFullPair(s, projectKey, environment)
-			envContent += fmt.Sprintf("%s=%s\n", k, v)
+			secretsMap, err := parseEnvFile(envFile)
+			if err != nil || len(secretsMap) == 0 {
+				color.Yellow("Ficheiro vazio ou ilegível: %s", envFile)
+				continue
+			}
+			var secrets []Secret
+			for k, v := range secretsMap {
+				s, err := service.EncryptFullPair(k, v, projectKey, environment)
+				if err != nil {
+					continue
+				}
+				secrets = append(secrets, s)
+			}
+			outPath := envFile + ".crypto"
+			payload := map[string]interface{}{
+				"version":              "2.2.0",
+				"team":                 team,
+				"project":              project,
+				"environment":          environment,
+				"secrets":              secrets,
+				"project_key_envelope": pullResp.EncryptedProjectKey,
+			}
+			data, err := json.MarshalIndent(payload, "", "  ")
+			if err != nil {
+				color.Red("Erro JSON %s: %v", envFile, err)
+				continue
+			}
+			if err := os.WriteFile(outPath, data, 0644); err != nil {
+				color.Red("Erro ao gravar %s: %v", outPath, err)
+				continue
+			}
+			toAdd = append(toAdd, outPath)
+			color.Green("✔ %s → %s", envFile, outPath)
 		}
-		os.WriteFile(environment, []byte(envContent), 0644)
-		color.Green("✔ %s updated! 💎", environment)
+
+		for _, p := range toAdd {
+			exec.Command("git", "add", p).Run()
+		}
+		if len(toAdd) > 0 {
+			color.Cyan("📝 git commit…")
+			checkPush := exec.Command("git", "branch", "-r", "--contains", "HEAD")
+			out, _ := checkPush.Output()
+			if len(strings.TrimSpace(string(out))) == 0 {
+				exec.Command("git", "commit", "--amend", "--no-edit").Run()
+			} else {
+				exec.Command("git", "commit", "-m", "chore(env): sync secrets 🌸").Run()
+			}
+			color.Cyan("🚀 git push…")
+			cmdGit := exec.Command("git", "push")
+			cmdGit.Stdout = os.Stdout
+			cmdGit.Stderr = os.Stderr
+			_ = cmdGit.Run()
+			color.Green("✔ Repositório atualizado. 🌸🚀")
+		}
+
+	case "pull":
+		if err := requireGitWorktree(); err != nil {
+			color.Red("❌ %v", err)
+			return
+		}
+		if err := requireGitRemote(service); err != nil {
+			color.Red("❌ %v", err)
+			return
+		}
+		team, project, ok := ensureTeamProjectAccess(service, pubStr, privKey)
+		if !ok {
+			return
+		}
+
+		color.Cyan("📥 git pull…")
+		_ = exec.Command("git", "pull").Run()
+
+		var cryptoFiles []string
+		filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			if info.IsDir() {
+				if isSkippableDir(info.Name()) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if strings.HasSuffix(path, ".crypto") && strings.Contains(filepath.Base(path), ".env") {
+				cryptoFiles = append(cryptoFiles, path)
+			}
+			return nil
+		})
+
+		for _, cryptoFile := range cryptoFiles {
+			data, err := os.ReadFile(cryptoFile)
+			if err != nil {
+				color.Yellow("Ignorado (leitura): %s", cryptoFile)
+				continue
+			}
+			var meta struct {
+				Environment string   `json:"environment"`
+				Secrets     []Secret `json:"secrets"`
+			}
+			if err := json.Unmarshal(data, &meta); err != nil || meta.Environment == "" || len(meta.Secrets) == 0 {
+				color.Yellow("Ignorado (metadata inválida): %s", cryptoFile)
+				continue
+			}
+
+			pullResp, st, err := postPullSecrets(service, pubStr, privKey, team, project, meta.Environment)
+			if err != nil {
+				color.Yellow("Erro API %s: %v", cryptoFile, err)
+				continue
+			}
+			if st != http.StatusOK || pullResp.EncryptedProjectKey == "" {
+				msg := pullResp.Error
+				if msg == "" {
+					msg = fmt.Sprintf("HTTP %d", st)
+				}
+				color.Yellow("Sem permissão para %s — ignorado (%s)", meta.Environment, msg)
+				continue
+			}
+
+			pkb, err := service.RSADecrypt(pullResp.EncryptedProjectKey, privKey)
+			if err != nil {
+				color.Yellow("Chave do projeto: %s", cryptoFile)
+				continue
+			}
+			projectKey := string(pkb)
+
+			dir := filepath.Dir(cryptoFile)
+			base := filepath.Base(cryptoFile)
+			envName := strings.TrimSuffix(base, ".crypto")
+			outPath := filepath.Join(dir, envName)
+
+			var envContent string
+			for _, sec := range meta.Secrets {
+				k, v, err := service.DecryptFullPair(sec, projectKey, meta.Environment)
+				if err != nil {
+					color.Yellow("Erro ao desencriptar entrada em %s", cryptoFile)
+					continue
+				}
+				envContent += fmt.Sprintf("%s=%s\n", k, v)
+			}
+			if err := os.WriteFile(outPath, []byte(envContent), 0644); err != nil {
+				color.Red("Erro ao gravar %s: %v", outPath, err)
+				continue
+			}
+			color.Green("✔ %s", outPath)
+		}
+		color.Green("✔ Pull concluído. 🌸🚀")
 
 	case "encrypt":
-		var team, project string
+		if err := requireGitWorktree(); err != nil {
+			color.Red("❌ %v", err)
+			return
+		}
+		if err := requireGitRemote(service); err != nil {
+			color.Red("❌ %v", err)
+			return
+		}
+		team, project, ok := ensureTeamProjectAccess(service, pubStr, privKey)
+		if !ok {
+			return
+		}
 		environment := ".env"
-		if len(os.Args) >= 4 {
-			team, project = os.Args[2], os.Args[3]
-			if len(os.Args) >= 5 { environment = os.Args[4] }
-		} else {
-			team, project, _ = service.ResolveContext("", "")
+		if len(os.Args) >= 3 {
+			environment = os.Args[2]
+		}
+		if err := validateEnvironment(environment); err != nil {
+			color.Red("❌ %v", err)
+			return
 		}
 
 		outputFile := environment + ".crypto"
-		signature, _ := service.getAuthChallenge(pubStr, privKey)
-		pullReq, _ := json.Marshal(PullRequest{PublicKey: pubStr, Signature: signature, TeamSlug: team, ProjectSlug: project, Environment: environment})
-		resp, _ := http.Post(service.BaseURL+"/pull-secrets", "application/json", bytes.NewBuffer(pullReq))
-		var pullResp CommonResponse
-		json.NewDecoder(resp.Body).Decode(&pullResp)
+		pullResp, st, err := postPullSecrets(service, pubStr, privKey, team, project, environment)
+		if err != nil || st != http.StatusOK || pullResp.EncryptedProjectKey == "" {
+			color.Red("❌ Não foi possível obter a chave do projeto (verifica acesso ao ambiente).")
+			return
+		}
 
 		projectKeyBytes, _ := service.RSADecrypt(pullResp.EncryptedProjectKey, privKey)
 		projectKey := string(projectKeyBytes)
 
-		secretsMap, _ := parseEnvFile(environment)
+		secretsMap, err := parseEnvFile(environment)
+		if err != nil || len(secretsMap) == 0 {
+			color.Red("❌ Ficheiro %s vazio ou inexistente.", environment)
+			return
+		}
 		var secrets []Secret
 		for k, v := range secretsMap {
-			s, _ := service.EncryptFullPair(k, v, projectKey, environment)
+			s, err := service.EncryptFullPair(k, v, projectKey, environment)
+			if err != nil {
+				continue
+			}
 			secrets = append(secrets, s)
 		}
 
@@ -671,72 +910,94 @@ func main() {
 		color.Green("✔ Encrypted: %s 🛡️🌸", outputFile)
 
 	case "decrypt":
-		var team, project string
+		if err := requireGitWorktree(); err != nil {
+			color.Red("❌ %v", err)
+			return
+		}
+		if err := requireGitRemote(service); err != nil {
+			color.Red("❌ %v", err)
+			return
+		}
+		team, project, ok := ensureTeamProjectAccess(service, pubStr, privKey)
+		if !ok {
+			return
+		}
 		cryptoFile := ".env.crypto"
-		if len(os.Args) >= 4 {
-			team, project = os.Args[2], os.Args[3]
-			if len(os.Args) >= 5 { cryptoFile = os.Args[4] }
-		} else {
-			team, project, _ = service.ResolveContext("", "")
+		if len(os.Args) >= 3 {
+			cryptoFile = os.Args[2]
 		}
 
-		cryptoData, _ := os.ReadFile(cryptoFile)
-		var payload struct {
+		cryptoData, err := os.ReadFile(cryptoFile)
+		if err != nil {
+			color.Red("❌ %v", err)
+			return
+		}
+		var filePayload struct {
 			Environment string   `json:"environment"`
 			Secrets     []Secret `json:"secrets"`
-			Envelope    string   `json:"project_key_envelope"`
 		}
-		json.Unmarshal(cryptoData, &payload)
+		json.Unmarshal(cryptoData, &filePayload)
 
-		signature, _ := service.getAuthChallenge(pubStr, privKey)
-		pullReq, _ := json.Marshal(PullRequest{PublicKey: pubStr, Signature: signature, TeamSlug: team, ProjectSlug: project, Environment: payload.Environment})
-		resp, _ := http.Post(service.BaseURL+"/pull-secrets", "application/json", bytes.NewBuffer(pullReq))
-		var pullResp CommonResponse
-		json.NewDecoder(resp.Body).Decode(&pullResp)
+		pullResp, st, err := postPullSecrets(service, pubStr, privKey, team, project, filePayload.Environment)
+		if err != nil || st != http.StatusOK || pullResp.EncryptedProjectKey == "" {
+			color.Red("❌ Sem permissão ou chave indisponível para este ambiente.")
+			return
+		}
 
 		projectKeyBytes, _ := service.RSADecrypt(pullResp.EncryptedProjectKey, privKey)
 		projectKey := string(projectKeyBytes)
 
+		dir := filepath.Dir(cryptoFile)
+		base := filepath.Base(cryptoFile)
+		outName := strings.TrimSuffix(base, ".crypto")
+		outPath := filepath.Join(dir, outName)
+
 		var envContent string
-		for _, s := range payload.Secrets {
-			k, v, _ := service.DecryptFullPair(s, projectKey, payload.Environment)
+		for _, s := range filePayload.Secrets {
+			k, v, err := service.DecryptFullPair(s, projectKey, filePayload.Environment)
+			if err != nil {
+				continue
+			}
 			envContent += fmt.Sprintf("%s=%s\n", k, v)
 		}
-		os.WriteFile(".env.decrypted", []byte(envContent), 0644)
-		color.Green("✔ Decrypted! 💎🌸")
+		os.WriteFile(outPath, []byte(envContent), 0644)
+		color.Green("✔ Decrypted: %s 💎🌸", outPath)
 
 	case "request":
-		var team, project, role string
-		if len(os.Args) >= 5 {
-			team, project, role = os.Args[2], os.Args[3], os.Args[4]
-		} else {
-			team, project, _ = service.ResolveContext("", "")
-			if len(os.Args) >= 3 { role = os.Args[2] } else { role = "DEVELOPER" }
+		if err := requireGitWorktree(); err != nil {
+			color.Red("❌ %v", err)
+			return
 		}
-
-		reader := bufio.NewReader(os.Stdin)
-		fmt.Printf("👤 Name: ")
-		userName, _ := reader.ReadString('\n')
-		signature, _ := service.getAuthChallenge(pubStr, privKey)
-
-		reqData, _ := json.Marshal(AccessRequest{
-			PublicKey: pubStr, Signature: signature, TeamSlug: team, ProjectSlug: project, Role: role, UserName: strings.TrimSpace(userName),
-		})
-		respReq, _ := http.Post(service.BaseURL+"/request-access", "application/json", bytes.NewBuffer(reqData))
-		var res CommonResponse
-		json.NewDecoder(respReq.Body).Decode(&res)
-		if res.Success {
-			color.Green("✨ %s", res.Message)
-			if strings.ToUpper(role) == "OWNER" {
-				gitUrl := service.GetGitRemoteURL()
-				if gitUrl != "" {
-					signatureLink, _ := service.getAuthChallenge(pubStr, privKey)
-					linkReq := map[string]string{"publicKey": pubStr, "signature": signatureLink, "teamSlug": team, "projectSlug": project, "gitUrl": gitUrl}
-					reqBody, _ := json.Marshal(linkReq)
-					http.Post(service.BaseURL+"/projects/link", "application/json", bytes.NewBuffer(reqBody))
-				}
+		if err := requireGitRemote(service); err != nil {
+			color.Red("❌ %v", err)
+			return
+		}
+		gitURL := service.GetGitRemoteURL()
+		res, err := service.FetchOriginResolve(gitURL, pubStr)
+		if err != nil {
+			color.Red("❌ %v", err)
+			return
+		}
+		var team, project, role string
+		if res.ProjectRegistered {
+			if res.MembershipKnown && res.Member {
+				color.Yellow("Já tens acesso a este projeto no Envware como membro do team.")
+				return
+			}
+			team, project = res.TeamSlug, res.ProjectSlug
+			role = "DEVELOPER"
+			if len(os.Args) >= 3 {
+				role = os.Args[2]
+			}
+		} else {
+			if len(os.Args) >= 5 {
+				team, project, role = os.Args[2], os.Args[3], os.Args[4]
+			} else {
+				color.Yellow("Este repositório não usa Envware no origin — indica: git envw request <team> <project> <role>")
+				return
 			}
 		}
+		runAccessRequest(service, pubStr, privKey, team, project, role)
 		return
 
 	case "accept":
@@ -779,13 +1040,39 @@ func main() {
 		}
 
 	case "purchase":
+		if err := requireGitWorktree(); err != nil {
+			color.Red("❌ %v", err)
+			return
+		}
+		if err := requireGitRemote(service); err != nil {
+			color.Red("❌ %v", err)
+			return
+		}
+		tOrig, pOrig, ok := ensureTeamProjectAccess(service, pubStr, privKey)
+		if !ok {
+			return
+		}
 		var category, teamSlug, projectSlug, action, quantity string
 		action, quantity = "add", "1"
 		if len(os.Args) >= 4 {
 			category, teamSlug = os.Args[2], os.Args[3]
 			if category == "users" {
-				if len(os.Args) >= 5 { projectSlug = os.Args[4] } else { _, projectSlug, _ = service.ResolveContext("", "") }
+				if len(os.Args) >= 5 {
+					projectSlug = os.Args[4]
+				} else {
+					projectSlug = pOrig
+				}
 			}
+		} else if len(os.Args) >= 3 {
+			category = os.Args[2]
+			teamSlug = tOrig
+			if category == "users" {
+				projectSlug = pOrig
+			}
+		}
+		if category == "" {
+			color.Red("Uso: git envw purchase <teams|projects|users> …")
+			return
 		}
 		signature, _ := service.getAuthChallenge(pubStr, privKey)
 		purReq, _ := json.Marshal(map[string]string{"publicKey": pubStr, "signature": signature, "category": category, "action": action, "teamSlug": teamSlug, "projectSlug": projectSlug, "quantity": quantity})
@@ -798,18 +1085,54 @@ func main() {
 		}
 
 	case "remove":
+		if len(os.Args) < 3 {
+			color.Red("Uso: git envw remove user [team] [project] <fingerprint>")
+			return
+		}
+		if err := requireGitWorktree(); err != nil {
+			color.Red("❌ %v", err)
+			return
+		}
+		if err := requireGitRemote(service); err != nil {
+			color.Red("❌ %v", err)
+			return
+		}
 		category := os.Args[2]
 		signature, _ := service.getAuthChallenge(pubStr, privKey)
 		if category == "user" {
 			var team, project, fp string
-			if len(os.Args) >= 6 { team, project, fp = os.Args[3], os.Args[4], os.Args[5] } else { team, project, _ = service.ResolveContext("", ""); if len(os.Args) >= 4 { fp = os.Args[3] } }
+			if len(os.Args) >= 6 {
+				team, project, fp = os.Args[3], os.Args[4], os.Args[5]
+			} else {
+				if len(os.Args) < 4 {
+					color.Red("Uso: git envw remove user <fingerprint>")
+					return
+				}
+				t, p, ok := ensureTeamProjectAccess(service, pubStr, privKey)
+				if !ok {
+					return
+				}
+				team, project = t, p
+				fp = os.Args[3]
+			}
 			req, _ := json.Marshal(map[string]string{"publicKey": pubStr, "signature": signature, "teamSlug": team, "projectSlug": project, "fingerprint": fp})
 			http.Post(service.BaseURL+"/project-user-remove", "application/json", bytes.NewBuffer(req))
 			color.Green("✔ User removed! 🌸")
 		}
 
 	case "status":
-		t, p, _ := service.ResolveContext("", "")
+		if err := requireGitWorktree(); err != nil {
+			color.Red("❌ %v", err)
+			return
+		}
+		if err := requireGitRemote(service); err != nil {
+			color.Red("❌ %v", err)
+			return
+		}
+		t, p, ok := ensureTeamProjectAccess(service, pubStr, privKey)
+		if !ok {
+			return
+		}
 		signature, _ := service.getAuthChallenge(pubStr, privKey)
 		statReq, _ := json.Marshal(StatusRequest{PublicKey: pubStr, Signature: signature, TeamSlug: t, ProjectSlug: p})
 		resp, _ := http.Post(service.BaseURL+"/team-stats", "application/json", bytes.NewBuffer(statReq))
@@ -820,40 +1143,29 @@ func main() {
 	case "fingerprint":
 		fmt.Printf("💻 Fingerprint: SHA256:%s\n", service.GetFingerprint(pubStr))
 
-	case "version":
-		fmt.Println("envware-go version 2.2.0 🌸")
-
 	case "help":
-		showUsage(isGitMode)
+		showUsage()
 
 	default:
-		showUsage(isGitMode)
+		showUsage()
 	}
 }
 
-func showUsage(isGitMode bool) {
-	if isGitMode {
-		fmt.Println("\nUsage: git envware <command> [args...]")
-		fmt.Println("  checkout <url>                Clone repository and link to Envware 🌸")
-		fmt.Println("  link <team> <project> [url]    Link current Git repo to Envware 🌸")
-		fmt.Println("  request <role>                Request access using current Git context 🛡️")
-		fmt.Println("  pull                          Recursive sync for monorepos 🚀")
-		fmt.Println("  push                          Recursive push for monorepos 🚀")
-	} else {
-		fmt.Println("\nUsage: envw <command> [args...] 🌸")
-	}
-	fmt.Println("\nCore Commands:")
-	fmt.Println("  push [team] [project] [env]    Sync secrets")
-	fmt.Println("  pull [team] [project] [env]    Sync secrets")
-	fmt.Println("  request <t> <p> <role>         Request access")
-	fmt.Println("  accept <fingerprint|id>        Approve access")
-	fmt.Println("  remove <cat> [args...]         Remove projects or users")
-	fmt.Println("\nBilling Commands:")
-	fmt.Println("  purchase teams [qty]           Buy team slots ($10/mo)")
-	fmt.Println("  purchase projects <team> [qty] Buy project slots ($10/mo)")
-	fmt.Println("  purchase users <t> <p> [qty]   Buy user slots ($10/mo)")
-	fmt.Println("\nOther:")
-	fmt.Println("  version, help, fingerprint, set-email")
+func showUsage() {
+	fmt.Println("\nUso: git envw <comando>  (binário: git-envw)")
+	fmt.Println("  clone <url>                     git clone + resolver projeto no Envware")
+	fmt.Println("  link <team> <project> [url]    Liga este repo (origin) ao projeto")
+	fmt.Println("  push                            Encripta todos os .env permitidos → .crypto + commit/push")
+	fmt.Println("  pull                            git pull + desencripta .crypto com permissão")
+	fmt.Println("  request [role]                  Pedido de acesso (origin resolve team/projeto)")
+	fmt.Println("  request <team> <project> <role> Primeiro pedido se o origin ainda não está registado")
+	fmt.Println("\nOutros:")
+	fmt.Println("  encrypt [.env…]                 Um ambiente → .crypto (usa origin)")
+	fmt.Println("  decrypt [ficheiro.crypto]       Desencripta um .crypto")
+	fmt.Println("  accept <id|fingerprint>         Aprovar pedido")
+	fmt.Println("  remove user …                   Remover utilizador do projeto")
+	fmt.Println("  purchase …                      Pacotes (equipa verifica API)")
+	fmt.Println("  status | fingerprint | version | help")
 }
 
 func parseEnvFile(path string) (map[string]string, error) {
